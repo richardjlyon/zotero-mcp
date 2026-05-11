@@ -18,3 +18,14 @@ pub struct NormalizedRecord {
     pub creators: Vec<Creator>,
     pub source_url: Option<String>,
 }
+
+/// Split a full name into (first, last) by treating the last whitespace-separated
+/// token as the surname. Used by arXiv and Semantic Scholar clients.
+pub(crate) fn openlibrary_like_split(full: &str) -> (Option<String>, Option<String>) {
+    let parts: Vec<&str> = full.trim().rsplitn(2, ' ').collect();
+    match parts.as_slice() {
+        [last, first] => (Some((*first).to_string()), Some((*last).to_string())),
+        [single] => (None, Some((*single).to_string())),
+        _ => (None, None),
+    }
+}
