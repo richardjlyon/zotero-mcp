@@ -362,7 +362,7 @@ async fn extract(
             "failed to write .zotero-ft-cache after pdftotext fallback"
         );
     } else {
-        tracing::debug!(
+        tracing::info!(
             path = %cache.display(),
             "wrote .zotero-ft-cache after pdftotext fallback"
         );
@@ -379,12 +379,24 @@ async fn extract(
 /// Write the cache via tmp-file + rename so a kill mid-write doesn't leave
 /// a partial cache for Zotero to consume.
 async fn write_cache_atomic(cache: &Path, text: &str) -> std::io::Result<()> {
-    let tmp = cache.with_file_name(".zotero-ft-cache.tmp");
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let tmp_name = format!(".zotero-ft-cache.tmp.{}.{}", std::process::id(), nanos);
+    let tmp = cache.with_file_name(tmp_name);
+
     let mut content = text.to_owned();
     if !content.ends_with('\n') {
         content.push('\n');
     }
-    tokio::fs::write(&tmp, content).await?;
+
+    // If the write fails, do our best to remove the stale tmp file — best-effort.
+    if let Err(e) = tokio::fs::write(&tmp, content).await {
+        let _ = tokio::fs::remove_file(&tmp).await;
+        return Err(e);
+    }
     tokio::fs::rename(&tmp, cache).await
 }
 
