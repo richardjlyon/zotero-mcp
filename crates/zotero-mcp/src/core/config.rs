@@ -41,6 +41,20 @@ pub struct ZoteroConfig {
     pub include_group_libraries: bool,
     pub min_schema_userdata: i64,
     pub max_schema_userdata: i64,
+
+    /// Optional explicit path to the `pdftotext` binary. When set and the file
+    /// exists, used instead of PATH lookup. Useful for non-standard installs.
+    #[serde(default)]
+    pub pdftotext_path: Option<String>,
+
+    /// Whether to fall back to `pdftotext` (Poppler) when the in-process
+    /// `pdf-extract` engine fails. Default: true.
+    #[serde(default = "default_true")]
+    pub pdftotext_fallback: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for ZoteroConfig {
@@ -54,6 +68,8 @@ impl Default for ZoteroConfig {
             include_group_libraries: true,
             min_schema_userdata: 120,
             max_schema_userdata: 135,
+            pdftotext_path: None,
+            pdftotext_fallback: true,
         }
     }
 }
@@ -224,5 +240,24 @@ auto_apply_threshold = 0.75
         let p = expand_tilde("~/Zotero");
         assert!(p.starts_with("/"));
         assert!(p.contains("Zotero"));
+    }
+
+    #[test]
+    fn pdftotext_fallback_defaults_to_true() {
+        let c = Config::default();
+        assert!(c.zotero.pdftotext_fallback);
+        assert!(c.zotero.pdftotext_path.is_none());
+    }
+
+    #[test]
+    fn pdftotext_path_parses_from_toml() {
+        let toml = r#"
+[zotero]
+pdftotext_path = "/opt/homebrew/bin/pdftotext"
+pdftotext_fallback = false
+"#;
+        let c: Config = toml::from_str(toml).unwrap();
+        assert_eq!(c.zotero.pdftotext_path.as_deref(), Some("/opt/homebrew/bin/pdftotext"));
+        assert!(!c.zotero.pdftotext_fallback);
     }
 }
