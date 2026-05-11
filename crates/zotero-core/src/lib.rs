@@ -7,6 +7,7 @@ pub mod reader;
 pub mod pdf;
 pub mod web;
 pub mod bbt;
+pub mod writer;
 
 pub use error::{Error, Result};
 pub use config::Config;
