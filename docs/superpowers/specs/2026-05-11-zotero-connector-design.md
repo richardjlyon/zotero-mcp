@@ -77,7 +77,7 @@ zotero-mcp  ── read  ──▶ ~/Zotero/zotero.sqlite          (read-only, W
 
 - **Zotero not running and write requested** → fail with structured error message identifying which tool needs Zotero running.
 - **SQLite locked despite WAL** → retry with exponential backoff, max 3 attempts, then fail with a clear error.
-- **Schema version mismatch** → on startup, read Zotero's `version` table; if the schema version is outside the tested range, refuse to start with a precise error naming the expected and found versions.
+- **Schema version mismatch** → on startup, read Zotero's `version` table; if the schema version is outside the tested range (range to be pinned during implementation based on the current installed Zotero version), refuse to start with a precise error naming the expected and found versions.
 - **External API failure** → return partial enrichment results with a note of which sources failed rather than hard-failing the whole operation.
 - **PDF text extraction failure** → return error but never crash; full-text search still works for items with indexed text.
 
