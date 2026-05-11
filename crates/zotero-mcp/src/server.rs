@@ -2,6 +2,7 @@ use crate::state::AppState;
 use crate::tools::attachments::{self as att, FirstPagesArgs, ItemKeyArgs as AttachItemKey, RefetchArgs, WebArgs};
 use crate::tools::citations::{self as cit, FormatBibArgs, FormatCitationArgs};
 use crate::tools::search::{self, EmptyArgs, GetItemArgs, ListTagsArgs, RecentArgs, SearchArgs};
+use crate::tools::writes::{self as wr, AddNoteArgs, CollectionArgs, TagArgs, UpdateFieldsArgs};
 use rmcp::{
     Error as McpError, ServerHandler,
     model::{
@@ -140,6 +141,36 @@ impl ZoteroServer {
         #[tool(aggr)] args: FormatBibArgs,
     ) -> Result<CallToolResult, McpError> {
         cit::format_bibliography_t(&self.state, args).await
+    }
+
+    #[tool(description = "Attach a markdown/HTML note to a Zotero item (markdown converted to simple HTML).")]
+    pub async fn add_note(&self, #[tool(aggr)] args: AddNoteArgs) -> Result<CallToolResult, McpError> {
+        wr::add_note_t(&self.state, args).await
+    }
+
+    #[tool(description = "Patch arbitrary fields on an item (auto-detects current version for If-Unmodified-Since-Version).")]
+    pub async fn update_item_fields(&self, #[tool(aggr)] args: UpdateFieldsArgs) -> Result<CallToolResult, McpError> {
+        wr::update_item_fields_t(&self.state, args).await
+    }
+
+    #[tool(description = "Add tags to an item (deduplicates against existing tags).")]
+    pub async fn add_tags(&self, #[tool(aggr)] args: TagArgs) -> Result<CallToolResult, McpError> {
+        wr::add_tags_t(&self.state, args).await
+    }
+
+    #[tool(description = "Remove tags from an item.")]
+    pub async fn remove_tags(&self, #[tool(aggr)] args: TagArgs) -> Result<CallToolResult, McpError> {
+        wr::remove_tags_t(&self.state, args).await
+    }
+
+    #[tool(description = "Add an item to a collection (by collection key).")]
+    pub async fn add_to_collection(&self, #[tool(aggr)] args: CollectionArgs) -> Result<CallToolResult, McpError> {
+        wr::add_to_collection_t(&self.state, args).await
+    }
+
+    #[tool(description = "Remove an item from a collection (by collection key).")]
+    pub async fn remove_from_collection(&self, #[tool(aggr)] args: CollectionArgs) -> Result<CallToolResult, McpError> {
+        wr::remove_from_collection_t(&self.state, args).await
     }
 }
 
