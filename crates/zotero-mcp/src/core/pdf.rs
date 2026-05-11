@@ -41,11 +41,11 @@ pub enum EngineError {
     Timeout(u64),
 }
 
-impl EngineError {
-    pub fn display(&self) -> String {
+impl std::fmt::Display for EngineError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            EngineError::Failed(s) => s.clone(),
-            EngineError::Timeout(secs) => format!("timed out after {}s", secs),
+            EngineError::Failed(s) => f.write_str(s),
+            EngineError::Timeout(secs) => write!(f, "timed out after {}s", secs),
         }
     }
 }
@@ -71,8 +71,8 @@ impl PdfEngine for PdfExtractEngine {
         match join {
             Ok(Ok(text)) => Ok(text),
             Ok(Err(msg)) => Err(EngineError::Failed(msg)),
-            // A panic inside the blocking task surfaces as a JoinError.
-            Err(je) => Err(EngineError::Failed(format!("pdf-extract panicked: {}", je))),
+            Err(je) if je.is_panic() => Err(EngineError::Failed(format!("pdf-extract panicked: {}", je))),
+            Err(je) => Err(EngineError::Failed(format!("pdf-extract task cancelled: {}", je))),
         }
     }
 }
