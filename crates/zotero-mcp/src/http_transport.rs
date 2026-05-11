@@ -107,19 +107,24 @@ async fn sse_handler(
         tracing::info!(%session_for_cleanup, "SSE session cleaned up");
     });
 
-    // First SSE event names the POST endpoint; subsequent events are the
-    // server's JSON-RPC messages serialized as `message` events.
+    // Cloudflare quick-tunnels buffer small SSE responses at the HTTP/2 edge
+    // until ~2 KB of body has accumulated, which delays the `endpoint` event by
+    // up to the keep-alive interval. Prefix a ~2 KB comment so the very first
+    // chunk forces the edge buffer to flush.
     let session_for_endpoint = session.clone();
-    let init = futures::stream::once(async move {
+    let padding = ":".to_string() + &"x".repeat(2048);
+    let init = futures::stream::iter(vec![
+        Ok::<_, std::io::Error>(Event::default().comment(padding)),
         Ok(Event::default()
             .event("endpoint")
-            .data(format!("/message?sessionId={session_for_endpoint}")))
-    });
+            .data(format!("/message?sessionId={session_for_endpoint}"))),
+    ]);
     let rest = ReceiverStream::new(to_client_rx).map(|m| match serde_json::to_string(&m) {
         Ok(s) => Ok(Event::default().event("message").data(s)),
         Err(e) => Err(std::io::Error::new(std::io::ErrorKind::InvalidData, e)),
     });
-    Sse::new(init.chain(rest)).keep_alive(KeepAlive::default())
+    Sse::new(init.chain(rest))
+        .keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(5)))
 }
 
 pub async fn run(state: AppState, addr: SocketAddr, bearer: String) -> anyhow::Result<()> {
