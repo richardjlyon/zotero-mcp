@@ -4,11 +4,13 @@ use crate::core::reader::attachments::resolve_path;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum PdfTextSource {
     ZoteroCache,
     LiveExtract,
+    /// Recovered via Poppler's `pdftotext` after `pdf-extract` failed.
+    PdftotextFallback,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
