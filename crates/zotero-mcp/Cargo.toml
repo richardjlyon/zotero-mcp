@@ -28,6 +28,7 @@ futures = "0.3"
 rand = "0.9"
 base64 = "0.22"
 sha2 = "0.10"
+clap = { version = "4", features = ["derive"] }
 directories.workspace = true
 toml.workspace = true
 zotero-core = { path = "../zotero-core" }

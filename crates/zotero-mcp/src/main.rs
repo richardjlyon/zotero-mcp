@@ -3,14 +3,52 @@ mod logging;
 mod oauth;
 mod resources;
 mod server;
+mod setup;
 mod state;
 mod tools;
 
+use clap::{Parser, Subcommand};
 use rmcp::ServiceExt;
 use std::net::SocketAddr;
 
+#[derive(Parser)]
+#[command(
+    name = "zotero-mcp",
+    about = "Local-first Zotero bridge: runs as an MCP server over stdio (default), \
+             HTTP/SSE (when ZOTERO_MCP_HTTP is set), or a setup helper for the HTTP \
+             deployment."
+)]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Interactive setup: detect Tailscale, write launchd plist, enable
+    /// Funnel, generate OAuth credentials, and print the values to paste into
+    /// the Claude.ai connector. macOS-only.
+    Setup,
+    /// Read-only health check covering launchd, the HTTP server, Tailscale
+    /// Funnel, the Zotero local API, and the OAuth config file.
+    Status,
+    /// Print the current OAuth client_id, client_secret, and connector URL
+    /// from <config_dir>/oauth.toml in paste-ready form.
+    ShowCredentials,
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let cli = Cli::parse();
+    match cli.command {
+        Some(Command::Setup) => setup::run_setup().await,
+        Some(Command::Status) => setup::run_status().await,
+        Some(Command::ShowCredentials) => setup::run_show_credentials(),
+        None => run_server().await,
+    }
+}
+
+async fn run_server() -> anyhow::Result<()> {
     let cfg = zotero_core::Config::load().unwrap_or_default();
     logging::init(&cfg.logging.level, Some(&cfg.resolved_log_dir()))?;
     tracing::info!(

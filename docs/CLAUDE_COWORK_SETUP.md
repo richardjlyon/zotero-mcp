@@ -28,56 +28,82 @@ so anyone hitting the public URL without a valid bearer token gets a
 - Zotero desktop running (Preferences → Advanced → "Allow other
   applications to communicate with Zotero" enabled).
 
-## One-time setup
+## One-time setup (recommended)
 
-1. **Install the launchd plist** for the HTTP server (the file is
-   checked into this repo at `docs/launchd/com.zotero-mcp.http.plist`;
-   copy or recreate it under `~/Library/LaunchAgents/`). It sets:
+```bash
+cargo install --path crates/zotero-mcp     # or: cargo install zotero-mcp
+zotero-mcp setup
+```
 
-   - `ZOTERO_MCP_HTTP=127.0.0.1:8765`
-   - `ZOTERO_MCP_OAUTH_ISSUER=https://laptop.<tailnet>.ts.net` —
-     **must match the public Tailscale Funnel hostname exactly**, with
-     `https://` and no trailing slash. OAuth clients validate this in
-     discovery, so a mismatch breaks the handshake.
+`zotero-mcp setup` auto-detects the Tailscale Funnel hostname from
+`tailscale status --json`, writes
+`~/Library/LaunchAgents/com.zotero-mcp.http.plist`, bootstraps the
+launchd job, enables `tailscale funnel --bg 8765`, waits for the server
+to materialize `oauth.toml`, and prints a paste-ready credentials block:
 
-   ```bash
-   mkdir -p ~/Library/Logs/zotero-mcp
-   launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.zotero-mcp.http.plist
-   ```
+```
+=== Paste these into Claude.ai → Settings → Connectors → Add custom ===
 
-   On first start the server generates a pre-shared OAuth client
-   credential pair at
-   `~/Library/Application Support/dev.zotero-mcp.zotero-mcp/oauth.toml`
-   (mode `0600`) and prints it to stderr. The TOML looks like:
+  Server URL          https://laptop.<tailnet>.ts.net/sse
+  Advanced ▸ Client ID     zotero-mcp-<8-hex>
+  Advanced ▸ Client Secret <32-hex>
+```
 
-   ```toml
-   client_id = "zotero-mcp-<8-hex>"
-   client_secret = "<32-hex>"
-   issuer = "https://laptop.<tailnet>.ts.net"
-   ```
+Two other subcommands round out the CLI:
 
-2. **Enable Tailscale Funnel** for port 8765:
+- **`zotero-mcp status`** — health check across launchd, the HTTP
+  listener, Funnel, the Zotero local API, and `oauth.toml`.
+- **`zotero-mcp show-credentials`** — re-print the paste-ready block
+  without regenerating anything.
 
-   ```bash
-   tailscale funnel --bg 8765
-   ```
+If `setup` reports "Tailscale not available", install it from
+<https://tailscale.com/download/macos> and enable Funnel on your tailnet
+at <https://login.tailscale.com/admin/settings/features>, then re-run.
 
-   This prints a public URL like `https://laptop.<tailnet>.ts.net`.
-   Funnel state persists across reboots; `tailscaled` re-establishes
-   it automatically.
+## Manual setup (fallback)
 
-3. **Verify** discovery + 401 challenge:
+If you prefer to wire everything by hand — or you're on an OS without
+launchd — set the environment yourself:
 
-   ```bash
-   URL="https://laptop.<tailnet>.ts.net"
-   curl -sS "$URL/.well-known/oauth-authorization-server" | jq .
-   curl -sSi -m 5 "$URL/sse" | head -3
-   ```
+- `ZOTERO_MCP_HTTP=127.0.0.1:8765`
+- `ZOTERO_MCP_OAUTH_ISSUER=https://laptop.<tailnet>.ts.net` — **must
+  match the public Tailscale Funnel hostname exactly**, with `https://`
+  and no trailing slash. OAuth clients validate this in discovery, so a
+  mismatch breaks the handshake.
 
-   The discovery doc should advertise `authorization_endpoint`,
-   `token_endpoint`, and `code_challenge_methods_supported=["S256"]`.
-   `/sse` should return `401 Unauthorized` with a
-   `WWW-Authenticate: Bearer …, resource_metadata="…"` header.
+A reference plist is checked into this repo at
+`docs/launchd/com.zotero-mcp.http.plist`. Copy it to
+`~/Library/LaunchAgents/`, then:
+
+```bash
+mkdir -p ~/Library/Logs/zotero-mcp
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.zotero-mcp.http.plist
+tailscale funnel --bg 8765
+```
+
+On first start the server generates a pre-shared OAuth client
+credential pair at
+`~/Library/Application Support/dev.zotero-mcp.zotero-mcp/oauth.toml`
+(mode `0600`). Inspect with `zotero-mcp show-credentials` or `cat`:
+
+```toml
+client_id = "zotero-mcp-<8-hex>"
+client_secret = "<32-hex>"
+issuer = "https://laptop.<tailnet>.ts.net"
+```
+
+Verify discovery + 401 challenge:
+
+```bash
+URL="https://laptop.<tailnet>.ts.net"
+curl -sS "$URL/.well-known/oauth-authorization-server" | jq .
+curl -sSi -m 5 "$URL/sse" | head -3
+```
+
+The discovery doc should advertise `authorization_endpoint`,
+`token_endpoint`, and `code_challenge_methods_supported=["S256"]`.
+`/sse` should return `401 Unauthorized` with a
+`WWW-Authenticate: Bearer …, resource_metadata="…"` header.
 
 ## Add the connector in Claude.ai
 
@@ -126,7 +152,7 @@ To re-issue `client_id`/`client_secret` (e.g. you suspect leak):
 ```bash
 rm "$HOME/Library/Application Support/dev.zotero-mcp.zotero-mcp/oauth.toml"
 launchctl kickstart -k gui/$(id -u)/com.zotero-mcp.http
-cat "$HOME/Library/Application Support/dev.zotero-mcp.zotero-mcp/oauth.toml"
+zotero-mcp show-credentials
 ```
 
 Then paste the new `client_id` / `client_secret` into the Claude.ai
