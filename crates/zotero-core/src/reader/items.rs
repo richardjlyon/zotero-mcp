@@ -1,3 +1,4 @@
+use crate::bbt::BbtClient;
 use crate::error::{Error, Result};
 use crate::reader::pool::ReadOnlyPool;
 use crate::types::{Creator, Item};
@@ -130,4 +131,14 @@ pub async fn get_item_by_key(pool: &ReadOnlyPool, key: &str, library_id: i64) ->
         .await?;
 
     result.ok_or_else(|| Error::ItemNotFound(key.to_string()))
+}
+
+pub async fn hydrate_citation_key(item: &mut Item, bbt: Option<&BbtClient>) {
+    if item.citation_key.is_some() { return; }
+    let Some(client) = bbt else { return };
+    if let Ok(map) = client.citationkeys(&[item.key.clone()]).await {
+        if let Some(ck) = map.get(&item.key) {
+            item.citation_key = Some(ck.clone());
+        }
+    }
 }
