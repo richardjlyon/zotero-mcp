@@ -1,5 +1,6 @@
 mod http_transport;
 mod logging;
+mod oauth;
 mod resources;
 mod server;
 mod state;

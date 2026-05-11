@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use axum::{
     Json, Router,
-    extract::{Query, State},
+    extract::{Query, Request, State},
     http::StatusCode,
     response::sse::{Event, KeepAlive, Sse},
     routing::{get, post},
@@ -33,6 +33,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::PollSender;
 use tower_http::validate_request::ValidateRequestHeaderLayer;
 
+use crate::oauth;
 use crate::server::ZoteroServer;
 use crate::state::AppState;
 
@@ -136,12 +137,18 @@ pub async fn run(
         state,
         txs: Default::default(),
     };
-    let mut app = Router::new()
+    let resource_routes = Router::new()
         .route("/sse", get(sse_handler))
         .route("/message", post(post_handler))
-        .with_state(shared)
-        // Log every incoming request so we can see what Claude.ai's connector
-        // probes look like.
+        .with_state(shared);
+
+    let mut app = Router::new()
+        .merge(resource_routes)
+        .merge(oauth::router())
+        // Task A probe instrumentation: log every request that doesn't match a
+        // registered route so we can see what Claude.ai's connector dialog
+        // hits before it starts sending OAuth requests. Removed in Task F.
+        .fallback(probe_fallback)
         .layer(tower_http::trace::TraceLayer::new_for_http());
 
     if let Some(token) = bearer {
@@ -163,4 +170,15 @@ pub async fn run(
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+/// Task A probe instrumentation. Removed in Task F.
+async fn probe_fallback(req: Request) -> StatusCode {
+    tracing::info!(
+        method = %req.method(),
+        uri = %req.uri(),
+        headers = ?req.headers(),
+        "probe: unrecognised route hit"
+    );
+    StatusCode::NOT_FOUND
 }
