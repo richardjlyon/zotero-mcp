@@ -1,6 +1,10 @@
 use crate::state::AppState;
 use crate::tools::attachments::{self as att, FirstPagesArgs, ItemKeyArgs as AttachItemKey, RefetchArgs, WebArgs};
 use crate::tools::citations::{self as cit, FormatBibArgs, FormatCitationArgs};
+use crate::tools::enrichment::{
+    self as en, ApplyArgs, ArxivArgs, DoiArgs, EnrichArgs, IsbnArgs, ProposeArgs,
+    SearchSourceArgs, WeakArgs,
+};
 use crate::tools::search::{self, EmptyArgs, GetItemArgs, ListTagsArgs, RecentArgs, SearchArgs};
 use crate::tools::writes::{self as wr, AddNoteArgs, CollectionArgs, TagArgs, UpdateFieldsArgs};
 use rmcp::{
@@ -171,6 +175,51 @@ impl ZoteroServer {
     #[tool(description = "Remove an item from a collection (by collection key).")]
     pub async fn remove_from_collection(&self, #[tool(aggr)] args: CollectionArgs) -> Result<CallToolResult, McpError> {
         wr::remove_from_collection_t(&self.state, args).await
+    }
+
+    #[tool(description = "Find items with weak metadata (missing DOI/abstract, stub titles).")]
+    pub async fn find_weak_metadata_items(&self, #[tool(aggr)] args: WeakArgs) -> Result<CallToolResult, McpError> {
+        en::find_weak_metadata_items_t(&self.state, args).await
+    }
+
+    #[tool(description = "Look up a DOI via CrossRef and return Zotero-shaped metadata.")]
+    pub async fn lookup_doi(&self, #[tool(aggr)] args: DoiArgs) -> Result<CallToolResult, McpError> {
+        en::lookup_doi_t(&self.state, args).await
+    }
+
+    #[tool(description = "Look up an ISBN via OpenLibrary and return Zotero-shaped metadata.")]
+    pub async fn lookup_isbn(&self, #[tool(aggr)] args: IsbnArgs) -> Result<CallToolResult, McpError> {
+        en::lookup_isbn_t(&self.state, args).await
+    }
+
+    #[tool(description = "Look up an arXiv preprint by ID and return Zotero-shaped metadata.")]
+    pub async fn lookup_arxiv(&self, #[tool(aggr)] args: ArxivArgs) -> Result<CallToolResult, McpError> {
+        en::lookup_arxiv_t(&self.state, args).await
+    }
+
+    #[tool(description = "Search CrossRef by free-text query; returns normalized candidates.")]
+    pub async fn search_crossref(&self, #[tool(aggr)] args: SearchSourceArgs) -> Result<CallToolResult, McpError> {
+        en::search_crossref_t(&self.state, args).await
+    }
+
+    #[tool(description = "Search Semantic Scholar by free-text query; returns normalized candidates.")]
+    pub async fn search_semantic_scholar(&self, #[tool(aggr)] args: SearchSourceArgs) -> Result<CallToolResult, McpError> {
+        en::search_semantic_scholar_t(&self.state, args).await
+    }
+
+    #[tool(description = "Score candidate metadata and produce an EnrichmentProposal (does not apply).")]
+    pub async fn propose_metadata_update(&self, #[tool(aggr)] args: ProposeArgs) -> Result<CallToolResult, McpError> {
+        en::propose_metadata_update_t(&self.state, args).await
+    }
+
+    #[tool(description = "Apply a previously generated EnrichmentProposal to Zotero.")]
+    pub async fn apply_metadata_update(&self, #[tool(aggr)] args: ApplyArgs) -> Result<CallToolResult, McpError> {
+        en::apply_metadata_update_t(&self.state, args).await
+    }
+
+    #[tool(description = "Compose propose+apply: only auto-applies when confidence >= threshold AND multi-source agreement.")]
+    pub async fn enrich_item(&self, #[tool(aggr)] args: EnrichArgs) -> Result<CallToolResult, McpError> {
+        en::enrich_item_t(&self.state, args).await
     }
 }
 
