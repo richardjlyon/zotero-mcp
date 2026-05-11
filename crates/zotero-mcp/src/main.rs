@@ -1,15 +1,7 @@
-mod http_transport;
-mod logging;
-mod oauth;
-mod resources;
-mod server;
-mod setup;
-mod state;
-mod tools;
-
 use clap::{Parser, Subcommand};
 use rmcp::ServiceExt;
 use std::net::SocketAddr;
+use zotero_mcp::{core as zcore, http_transport, logging, oauth, server, setup, state};
 
 #[derive(Parser)]
 #[command(
@@ -49,7 +41,7 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn run_server() -> anyhow::Result<()> {
-    let cfg = zotero_core::Config::load().unwrap_or_default();
+    let cfg = zcore::Config::load().unwrap_or_default();
     logging::init(&cfg.logging.level, Some(&cfg.resolved_log_dir()))?;
     tracing::info!(
         "zotero-mcp starting (user_id auto-detect = {})",

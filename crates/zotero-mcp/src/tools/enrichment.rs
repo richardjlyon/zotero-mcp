@@ -7,12 +7,12 @@ use rmcp::model::{CallToolResult, Content};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use zotero_core::enrichment::NormalizedRecord;
-use zotero_core::enrichment::propose::{
+use crate::core::enrichment::NormalizedRecord;
+use crate::core::enrichment::propose::{
     EnrichInput, ProposeInput, apply_metadata_update, enrich_item, find_weak_metadata_items,
     propose_metadata_update,
 };
-use zotero_core::types::EnrichmentProposal;
+use crate::core::types::EnrichmentProposal;
 
 fn invalid(msg: String) -> Error {
     Error::invalid_params(msg, None)

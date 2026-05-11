@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/zotero-core", "crates/zotero-mcp"]
+members = ["crates/zotero-mcp"]
 resolver = "2"
 
 [workspace.package]

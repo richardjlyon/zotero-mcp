@@ -4,7 +4,7 @@ use rmcp::Error;
 use rmcp::model::{CallToolResult, Content};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use zotero_core::citations::{format_bibliography, format_citation};
+use crate::core::citations::{format_bibliography, format_citation};
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 pub struct FormatCitationArgs {

@@ -1,13 +1,13 @@
 use std::sync::Arc;
-use zotero_core::bbt::BbtClient;
-use zotero_core::cache::DiskCache;
-use zotero_core::config::Config;
-use zotero_core::enrichment::arxiv::ArxivClient;
-use zotero_core::enrichment::crossref::CrossrefClient;
-use zotero_core::enrichment::openlibrary::OpenLibraryClient;
-use zotero_core::enrichment::semantic_scholar::SemanticScholarClient;
-use zotero_core::reader::pool::ReadOnlyPool;
-use zotero_core::writer::client::LocalApi;
+use crate::core::bbt::BbtClient;
+use crate::core::cache::DiskCache;
+use crate::core::config::Config;
+use crate::core::enrichment::arxiv::ArxivClient;
+use crate::core::enrichment::crossref::CrossrefClient;
+use crate::core::enrichment::openlibrary::OpenLibraryClient;
+use crate::core::enrichment::semantic_scholar::SemanticScholarClient;
+use crate::core::reader::pool::ReadOnlyPool;
+use crate::core::writer::client::LocalApi;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -26,8 +26,8 @@ impl AppState {
         let pool = ReadOnlyPool::new(cfg.sqlite_path(), 4).await?;
         // Schema-version check at startup
         {
-            let conn = zotero_core::reader::conn::open_read_only(&cfg.sqlite_path())?;
-            zotero_core::reader::conn::check_schema(
+            let conn = crate::core::reader::conn::open_read_only(&cfg.sqlite_path())?;
+            crate::core::reader::conn::check_schema(
                 &conn,
                 cfg.zotero.min_schema_userdata,
                 cfg.zotero.max_schema_userdata,

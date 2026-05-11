@@ -4,10 +4,10 @@ use rmcp::Error;
 use rmcp::model::{CallToolResult, Content};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use zotero_core::pdf::{get_pdf_first_pages, get_pdf_text};
-use zotero_core::reader::annotations::list_annotations;
-use zotero_core::reader::attachments::{list_attachments, resolve_path};
-use zotero_core::web::{get_webpage_content, refetch_url, WebMode};
+use crate::core::pdf::{get_pdf_first_pages, get_pdf_text};
+use crate::core::reader::annotations::list_annotations;
+use crate::core::reader::attachments::{list_attachments, resolve_path};
+use crate::core::web::{get_webpage_content, refetch_url, WebMode};
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 pub struct ItemKeyArgs {

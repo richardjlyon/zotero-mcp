@@ -3,11 +3,11 @@ use rmcp::Error;
 use rmcp::model::{CallToolResult, Content};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use zotero_core::reader::items::{get_item_by_key, hydrate_citation_key};
-use zotero_core::reader::search::{search_metadata, SearchParams};
-use zotero_core::reader::{collections, recent, tags};
+use crate::core::reader::items::{get_item_by_key, hydrate_citation_key};
+use crate::core::reader::search::{search_metadata, SearchParams};
+use crate::core::reader::{collections, recent, tags};
 
-pub(crate) fn map_err(e: zotero_core::Error) -> Error {
+pub(crate) fn map_err(e: crate::core::Error) -> Error {
     Error::internal_error(e.to_string(), None)
 }
 

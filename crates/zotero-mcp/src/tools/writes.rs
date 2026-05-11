@@ -4,10 +4,10 @@ use rmcp::Error;
 use rmcp::model::{CallToolResult, Content};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use zotero_core::reader::items::get_item_by_key;
-use zotero_core::writer::items::update_item_fields;
-use zotero_core::writer::notes::add_note;
-use zotero_core::writer::tags::{add_tags, add_to_collection, remove_from_collection, remove_tags};
+use crate::core::reader::items::get_item_by_key;
+use crate::core::writer::items::update_item_fields;
+use crate::core::writer::notes::add_note;
+use crate::core::writer::tags::{add_tags, add_to_collection, remove_from_collection, remove_tags};
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 pub struct AddNoteArgs {
