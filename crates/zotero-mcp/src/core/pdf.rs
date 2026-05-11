@@ -107,6 +107,54 @@ impl PdfEngines {
     pub fn fallback(&self) -> &FallbackState {
         &self.fallback
     }
+
+    /// Build the engine bundle from configuration. Resolves `pdftotext`:
+    ///
+    /// 1. `cfg.pdftotext_path` if set and the file exists.
+    /// 2. `which::which("pdftotext")` on PATH.
+    /// 3. Otherwise, the fallback is unavailable (`FallbackState::BinaryMissing`).
+    ///
+    /// Honors `cfg.pdftotext_fallback`: when false, the fallback is
+    /// `Disabled` regardless of discovery.
+    pub fn build(cfg: &crate::core::config::ZoteroConfig) -> Self {
+        let primary: Arc<dyn PdfEngine> = Arc::new(PdfExtractEngine);
+
+        let fallback = if !cfg.pdftotext_fallback {
+            tracing::debug!("pdftotext fallback disabled by config");
+            FallbackState::Disabled
+        } else {
+            match resolve_pdftotext(cfg.pdftotext_path.as_deref()) {
+                Some(bin) => {
+                    tracing::info!(path = %bin.display(), "pdftotext fallback enabled");
+                    FallbackState::Ready(Arc::new(PdftotextEngine::new(bin)))
+                }
+                None => {
+                    tracing::info!(
+                        "pdftotext not on PATH; PDF extraction has no fallback. \
+                         Install Poppler (`brew install poppler` or `apt install poppler-utils`) \
+                         for resilient extraction."
+                    );
+                    FallbackState::BinaryMissing
+                }
+            }
+        };
+
+        Self { primary, fallback }
+    }
+}
+
+fn resolve_pdftotext(override_path: Option<&str>) -> Option<PathBuf> {
+    if let Some(p) = override_path {
+        let pb = PathBuf::from(p);
+        if pb.exists() {
+            return Some(pb);
+        }
+        tracing::warn!(
+            path = p,
+            "configured pdftotext_path does not exist; falling back to PATH lookup"
+        );
+    }
+    which::which("pdftotext").ok()
 }
 
 /// Out-of-process PDF text extraction via Poppler's `pdftotext` binary.

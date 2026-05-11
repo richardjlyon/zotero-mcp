@@ -19,6 +19,7 @@ pub struct AppState {
     pub openlibrary: OpenLibraryClient,
     pub arxiv: ArxivClient,
     pub semantic_scholar: SemanticScholarClient,
+    pub pdf_engines: Arc<crate::core::pdf::PdfEngines>,
 }
 
 impl AppState {
@@ -58,6 +59,8 @@ impl AppState {
         let semantic_scholar =
             SemanticScholarClient::new("https://api.semanticscholar.org", cache, &ua, None);
 
+        let pdf_engines = Arc::new(crate::core::pdf::PdfEngines::build(&cfg.zotero));
+
         Ok(Self {
             cfg,
             pool,
@@ -67,6 +70,7 @@ impl AppState {
             openlibrary,
             arxiv,
             semantic_scholar,
+            pdf_engines,
         })
     }
 }
