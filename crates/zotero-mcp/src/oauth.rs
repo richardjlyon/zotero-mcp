@@ -1,12 +1,27 @@
 //! OAuth 2.1 authorization surface for the HTTP/SSE transport.
 //!
-//! Claude.ai's "Add custom connector" dialog exposes `client_id`/`client_secret`
-//! fields in its Advanced section. That UI shape — pre-shared credentials, no
-//! redirect URI, no consent screen — maps cleanly onto the OAuth 2.1
-//! Client Credentials grant (RFC 6749 §4.4). The MCP authorization spec
-//! (2025-11-25) requires Authorization Server Metadata (RFC 8414) and
-//! Protected Resource Metadata (RFC 9728) discovery so clients can find these
-//! endpoints; both are served unauthenticated.
+//! Claude.ai's MCP connector follows the spec-canonical flow: authorization
+//! code with PKCE (RFC 7636, S256). Even though the connector UI exposes
+//! "Client ID" / "Client Secret" fields, the actual grant is
+//! `authorization_code` — the secret is just an additional bearer of trust on
+//! the token request. The flow we observed in practice:
+//!
+//!   1. Client (Anthropic backend) hits `/sse` without a token →
+//!      `401 Unauthorized` with a `WWW-Authenticate: Bearer
+//!      resource_metadata="…"` challenge (RFC 9728 §5.1).
+//!   2. Client fetches `/.well-known/oauth-protected-resource` and
+//!      `/.well-known/oauth-authorization-server` to discover this endpoint set.
+//!   3. The user's browser is opened to `/authorize?response_type=code&…&
+//!      code_challenge=…&code_challenge_method=S256&state=…&redirect_uri=
+//!      https://claude.ai/api/mcp/auth_callback`.
+//!   4. We 302-redirect to that `redirect_uri` with a one-time code + state.
+//!   5. Claude.ai's backend posts `grant_type=authorization_code` to
+//!      `/oauth/token` with the code + `code_verifier`. We verify
+//!      `SHA256(code_verifier)` (base64url, no pad) matches the stored
+//!      `code_challenge` and mint an opaque access token.
+//!
+//! Both grant types — `authorization_code` and `client_credentials` — are
+//! supported. The latter is retained for headless scripting and tests.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -15,16 +30,27 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::{
     Form, Json, Router,
-    extract::State,
+    extract::{Query, State},
     http::{HeaderMap, StatusCode, header},
     response::IntoResponse,
     routing::{get, post},
 };
 use base64::Engine;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tokio::sync::RwLock;
 
 const TOKEN_TTL_SECS: u64 = 3600;
+const AUTH_CODE_TTL_SECS: u64 = 300;
+
+/// Redirect URIs we'll accept on the authorization endpoint. The OAuth 2.1
+/// spec requires exact-match validation against pre-registered values — for a
+/// single-purpose connector talking only to Claude.ai we hardcode the two
+/// hostnames Anthropic actually uses.
+const ALLOWED_REDIRECT_URI_PREFIXES: &[&str] = &[
+    "https://claude.ai/api/mcp/",
+    "https://claude.com/api/mcp/",
+];
 
 /// Pre-shared OAuth client credentials. Persisted at
 /// `<config_dir>/oauth.toml` with mode 0600 so the secret never lands in a
@@ -138,6 +164,16 @@ struct Inner {
     /// values are unix expiry timestamps. Restarts invalidate every token —
     /// clients re-acquire on the next 401.
     tokens: RwLock<HashMap<String, u64>>,
+    /// In-memory authorization-code store, keyed by code. Codes are
+    /// single-use — `take_auth_code` removes on lookup.
+    codes: RwLock<HashMap<String, AuthCode>>,
+}
+
+#[derive(Clone)]
+struct AuthCode {
+    code_challenge: String,
+    redirect_uri: String,
+    expires_at: u64,
 }
 
 impl OAuthState {
@@ -146,6 +182,7 @@ impl OAuthState {
             inner: Arc::new(Inner {
                 config,
                 tokens: RwLock::new(HashMap::new()),
+                codes: RwLock::new(HashMap::new()),
             }),
         }
     }
@@ -192,10 +229,12 @@ fn unix_now() -> u64 {
 #[derive(Serialize)]
 struct AuthorizationServerMetadata {
     issuer: String,
+    authorization_endpoint: String,
     token_endpoint: String,
     grant_types_supported: &'static [&'static str],
     token_endpoint_auth_methods_supported: &'static [&'static str],
     response_types_supported: &'static [&'static str],
+    code_challenge_methods_supported: &'static [&'static str],
     scopes_supported: &'static [&'static str],
 }
 
@@ -212,11 +251,13 @@ async fn authorization_server_metadata(
 ) -> Json<AuthorizationServerMetadata> {
     let issuer = state.issuer().to_string();
     Json(AuthorizationServerMetadata {
+        authorization_endpoint: format!("{issuer}/authorize"),
         token_endpoint: format!("{issuer}/oauth/token"),
         issuer,
-        grant_types_supported: &["client_credentials"],
+        grant_types_supported: &["authorization_code", "client_credentials"],
         token_endpoint_auth_methods_supported: &["client_secret_post", "client_secret_basic"],
-        response_types_supported: &["token"],
+        response_types_supported: &["code", "token"],
+        code_challenge_methods_supported: &["S256"],
         scopes_supported: &["mcp"],
     })
 }
@@ -236,8 +277,16 @@ async fn protected_resource_metadata(
 #[derive(Deserialize)]
 struct TokenRequest {
     grant_type: String,
+    // client_credentials inputs
     client_id: Option<String>,
     client_secret: Option<String>,
+    // authorization_code inputs
+    #[serde(default)]
+    code: Option<String>,
+    #[serde(default)]
+    code_verifier: Option<String>,
+    #[serde(default)]
+    redirect_uri: Option<String>,
     /// RFC 8707 Resource Indicator. Accepted but not enforced — single-resource
     /// server.
     #[allow(dead_code)]
@@ -268,17 +317,27 @@ async fn token_handler(
     headers: HeaderMap,
     Form(body): Form<TokenRequest>,
 ) -> axum::response::Response {
-    if body.grant_type != "client_credentials" {
-        return (
+    match body.grant_type.as_str() {
+        "authorization_code" => handle_authorization_code(state, headers, body).await,
+        "client_credentials" => handle_client_credentials(state, headers, body).await,
+        _ => (
             StatusCode::BAD_REQUEST,
             Json(OAuthError {
                 error: "unsupported_grant_type",
-                error_description: Some("only client_credentials is supported"),
+                error_description: Some(
+                    "only authorization_code and client_credentials are supported",
+                ),
             }),
         )
-            .into_response();
+            .into_response(),
     }
+}
 
+async fn handle_client_credentials(
+    state: OAuthState,
+    headers: HeaderMap,
+    body: TokenRequest,
+) -> axum::response::Response {
     let Some((client_id, client_secret)) = resolve_client_credentials(&headers, &body) else {
         return invalid_client();
     };
@@ -291,7 +350,73 @@ async fn token_handler(
     }
 
     let (token, ttl) = state.mint_token().await;
-    tracing::info!(client_id = %client_id, expires_in = ttl, "OAuth token minted");
+    tracing::info!(
+        client_id = %client_id,
+        grant = "client_credentials",
+        expires_in = ttl,
+        "OAuth token minted"
+    );
+    token_ok(token, ttl)
+}
+
+async fn handle_authorization_code(
+    state: OAuthState,
+    headers: HeaderMap,
+    body: TokenRequest,
+) -> axum::response::Response {
+    let Some(code) = body.code.as_deref() else {
+        return invalid_grant("missing code");
+    };
+    let Some(verifier) = body.code_verifier.as_deref() else {
+        return invalid_grant("missing code_verifier");
+    };
+    let Some(redirect_uri) = body.redirect_uri.as_deref() else {
+        return invalid_grant("missing redirect_uri");
+    };
+
+    // Client authentication is optional with PKCE per RFC 6749 §4.1.3 (the
+    // code_verifier is proof of possession) but if the caller did present
+    // credentials, validate them — Claude.ai may send the client_secret it
+    // was given.
+    if let Some((client_id, client_secret)) = resolve_client_credentials(&headers, &body) {
+        let expected = &state.inner.config;
+        if !constant_time_eq(client_id.as_bytes(), expected.client_id.as_bytes())
+            || !constant_time_eq(client_secret.as_bytes(), expected.client_secret.as_bytes())
+        {
+            return invalid_client();
+        }
+    } else if let Some(client_id) = body.client_id.as_deref() {
+        // client_id alone (public client) — must still match.
+        if !constant_time_eq(client_id.as_bytes(), state.inner.config.client_id.as_bytes()) {
+            return invalid_client();
+        }
+    }
+
+    let info = state.inner.codes.write().await.remove(code);
+    let Some(info) = info else {
+        return invalid_grant("unknown or already-used code");
+    };
+    if info.expires_at < unix_now() {
+        return invalid_grant("code expired");
+    }
+    if info.redirect_uri != redirect_uri {
+        return invalid_grant("redirect_uri mismatch");
+    }
+    let computed = pkce_s256(verifier);
+    if !constant_time_eq(computed.as_bytes(), info.code_challenge.as_bytes()) {
+        return invalid_grant("PKCE verification failed");
+    }
+
+    let (token, ttl) = state.mint_token().await;
+    tracing::info!(
+        grant = "authorization_code",
+        expires_in = ttl,
+        "OAuth token minted"
+    );
+    token_ok(token, ttl)
+}
+
+fn token_ok(token: String, ttl: u64) -> axum::response::Response {
     (
         StatusCode::OK,
         Json(TokenResponse {
@@ -302,6 +427,108 @@ async fn token_handler(
         }),
     )
         .into_response()
+}
+
+fn invalid_grant(detail: &'static str) -> axum::response::Response {
+    tracing::info!(detail, "authorization_code grant rejected");
+    (
+        StatusCode::BAD_REQUEST,
+        Json(OAuthError {
+            error: "invalid_grant",
+            error_description: Some(detail),
+        }),
+    )
+        .into_response()
+}
+
+/// `BASE64URL(SHA256(verifier))` with no padding, per RFC 7636 §4.6.
+fn pkce_s256(verifier: &str) -> String {
+    let digest = Sha256::digest(verifier.as_bytes());
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest)
+}
+
+#[derive(Deserialize)]
+struct AuthorizeQuery {
+    response_type: String,
+    client_id: String,
+    redirect_uri: String,
+    code_challenge: String,
+    code_challenge_method: String,
+    state: String,
+    #[allow(dead_code)]
+    #[serde(default)]
+    scope: Option<String>,
+    #[allow(dead_code)]
+    #[serde(default)]
+    resource: Option<String>,
+}
+
+async fn authorize_handler(
+    State(state): State<OAuthState>,
+    Query(q): Query<AuthorizeQuery>,
+) -> axum::response::Response {
+    // We validate the redirect_uri BEFORE responding via redirect — sending
+    // any params to an unvetted URI would be an open-redirect bug.
+    let redirect_ok = ALLOWED_REDIRECT_URI_PREFIXES
+        .iter()
+        .any(|p| q.redirect_uri.starts_with(p));
+    if !redirect_ok {
+        tracing::warn!(redirect_uri = %q.redirect_uri, "authorize: redirect_uri not allowed");
+        return (StatusCode::BAD_REQUEST, "invalid_redirect_uri").into_response();
+    }
+    if q.response_type != "code" {
+        return redirect_with_error(&q.redirect_uri, &q.state, "unsupported_response_type");
+    }
+    if q.code_challenge_method != "S256" {
+        return redirect_with_error(&q.redirect_uri, &q.state, "invalid_request");
+    }
+    if !constant_time_eq(q.client_id.as_bytes(), state.inner.config.client_id.as_bytes()) {
+        return redirect_with_error(&q.redirect_uri, &q.state, "unauthorized_client");
+    }
+    if q.code_challenge.is_empty() {
+        return redirect_with_error(&q.redirect_uri, &q.state, "invalid_request");
+    }
+
+    let code = format!("{:032x}", rand::random::<u128>());
+    let info = AuthCode {
+        code_challenge: q.code_challenge,
+        redirect_uri: q.redirect_uri.clone(),
+        expires_at: unix_now() + AUTH_CODE_TTL_SECS,
+    };
+    state.inner.codes.write().await.insert(code.clone(), info);
+    tracing::info!(redirect_uri = %q.redirect_uri, "authorization code issued");
+
+    let location = format!(
+        "{}?code={}&state={}",
+        q.redirect_uri,
+        urlencoding_minimal(&code),
+        urlencoding_minimal(&q.state),
+    );
+    (StatusCode::FOUND, [(header::LOCATION, location.as_str())]).into_response()
+}
+
+fn redirect_with_error(redirect_uri: &str, state: &str, error: &str) -> axum::response::Response {
+    let location = format!(
+        "{redirect_uri}?error={}&state={}",
+        urlencoding_minimal(error),
+        urlencoding_minimal(state)
+    );
+    (StatusCode::FOUND, [(header::LOCATION, location.as_str())]).into_response()
+}
+
+/// Minimal URL-encoding for the small set of characters that appear in our
+/// outputs (state tokens are alphanumeric+`_-`, codes are hex). Reaching for
+/// the `urlencoding` crate just to encode `&`, `=`, `+`, ` ` would be
+/// disproportionate.
+fn urlencoding_minimal(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_' | '.' | '~' => out.push(c),
+            _ => out.push_str(&format!("%{:02X}", c as u32)),
+        }
+    }
+    out
 }
 
 /// Pull `client_id`/`client_secret` from the form body (client_secret_post)
@@ -348,7 +575,13 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
-/// Build the public, unauthenticated OAuth surface (discovery + token).
+/// Build the public, unauthenticated OAuth surface.
+///
+/// Routes:
+///   - `GET /.well-known/oauth-authorization-server` — RFC 8414 metadata
+///   - `GET /.well-known/oauth-protected-resource`    — RFC 9728 metadata
+///   - `GET /authorize`                               — auth-code start (PKCE)
+///   - `POST /oauth/token`                            — token issuance
 pub fn router(state: OAuthState) -> Router {
     Router::new()
         .route(
@@ -359,6 +592,7 @@ pub fn router(state: OAuthState) -> Router {
             "/.well-known/oauth-protected-resource",
             get(protected_resource_metadata),
         )
+        .route("/authorize", get(authorize_handler))
         .route("/oauth/token", post(token_handler))
         .with_state(state)
 }
@@ -525,8 +759,11 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
         assert!(body.contains("\"issuer\":\"https://example.test\""));
+        assert!(body.contains("\"authorization_endpoint\":\"https://example.test/authorize\""));
         assert!(body.contains("\"token_endpoint\":\"https://example.test/oauth/token\""));
+        assert!(body.contains("\"authorization_code\""));
         assert!(body.contains("\"client_credentials\""));
+        assert!(body.contains("\"code_challenge_methods_supported\":[\"S256\"]"));
 
         let resp = app
             .oneshot(
@@ -541,5 +778,200 @@ mod tests {
         let body = body_string(resp).await;
         assert!(body.contains("\"resource\":\"https://example.test\""));
         assert!(body.contains("\"authorization_servers\":[\"https://example.test\"]"));
+    }
+
+    #[test]
+    fn pkce_s256_matches_rfc7636_example() {
+        // RFC 7636 Appendix B test vector
+        let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+        let expected = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
+        assert_eq!(pkce_s256(verifier), expected);
+    }
+
+    fn challenge_for(verifier: &str) -> String {
+        pkce_s256(verifier)
+    }
+
+    #[tokio::test]
+    async fn authorize_endpoint_redirects_with_code() {
+        let app = router(test_state());
+        let verifier = "test-verifier-string-of-reasonable-length-1234";
+        let challenge = challenge_for(verifier);
+        let uri = format!(
+            "/authorize?response_type=code&client_id=test-id&redirect_uri=https%3A%2F%2Fclaude.ai%2Fapi%2Fmcp%2Fauth_callback&code_challenge={challenge}&code_challenge_method=S256&state=xyz&scope=mcp",
+        );
+        let resp = app
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FOUND);
+        let location = resp
+            .headers()
+            .get(header::LOCATION)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(location.starts_with("https://claude.ai/api/mcp/auth_callback?code="));
+        assert!(location.contains("&state=xyz"));
+    }
+
+    #[tokio::test]
+    async fn authorize_rejects_disallowed_redirect_uri() {
+        let app = router(test_state());
+        let uri = "/authorize?response_type=code&client_id=test-id&redirect_uri=https%3A%2F%2Fattacker.example%2Fcb&code_challenge=abc&code_challenge_method=S256&state=z";
+        let resp = app
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn authorize_rejects_unknown_client_id() {
+        let app = router(test_state());
+        let uri = "/authorize?response_type=code&client_id=WRONG&redirect_uri=https%3A%2F%2Fclaude.ai%2Fapi%2Fmcp%2Fauth_callback&code_challenge=abc&code_challenge_method=S256&state=z";
+        let resp = app
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        // Error is reported via the redirect callback per OAuth spec
+        assert_eq!(resp.status(), StatusCode::FOUND);
+        let location = resp
+            .headers()
+            .get(header::LOCATION)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(location.contains("error=unauthorized_client"));
+    }
+
+    /// Round-trip the full auth-code + PKCE flow through the public router.
+    #[tokio::test]
+    async fn auth_code_grant_full_flow_succeeds() {
+        let state = test_state();
+        let verifier = "the-verifier-anthropic-would-have-generated";
+        let challenge = challenge_for(verifier);
+        let redirect_uri = "https://claude.ai/api/mcp/auth_callback";
+
+        // Step 1: /authorize, extract code from Location header.
+        let auth_uri = format!(
+            "/authorize?response_type=code&client_id=test-id&redirect_uri=https%3A%2F%2Fclaude.ai%2Fapi%2Fmcp%2Fauth_callback&code_challenge={challenge}&code_challenge_method=S256&state=opaque-state",
+        );
+        let resp = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri(auth_uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FOUND);
+        let location = resp
+            .headers()
+            .get(header::LOCATION)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        let code = location
+            .split_once("code=")
+            .and_then(|(_, rest)| rest.split('&').next())
+            .unwrap()
+            .to_string();
+
+        // Step 2: /oauth/token with grant_type=authorization_code.
+        let body = format!(
+            "grant_type=authorization_code&code={code}&redirect_uri={}&code_verifier={verifier}&client_id=test-id",
+            urlencoding_minimal(redirect_uri)
+        );
+        let resp = router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/oauth/token")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        assert!(body.contains("\"access_token\""));
+        assert!(body.contains("\"token_type\":\"Bearer\""));
+    }
+
+    #[tokio::test]
+    async fn auth_code_rejects_bad_verifier() {
+        let state = test_state();
+        let verifier = "correct-verifier";
+        let challenge = challenge_for(verifier);
+        let auth_uri = format!(
+            "/authorize?response_type=code&client_id=test-id&redirect_uri=https%3A%2F%2Fclaude.ai%2Fapi%2Fmcp%2Fauth_callback&code_challenge={challenge}&code_challenge_method=S256&state=s",
+        );
+        let resp = router(state.clone())
+            .oneshot(Request::builder().uri(auth_uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let location = resp
+            .headers()
+            .get(header::LOCATION)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        let code = location
+            .split_once("code=")
+            .and_then(|(_, rest)| rest.split('&').next())
+            .unwrap()
+            .to_string();
+
+        let body = format!(
+            "grant_type=authorization_code&code={code}&redirect_uri=https%3A%2F%2Fclaude.ai%2Fapi%2Fmcp%2Fauth_callback&code_verifier=WRONG&client_id=test-id"
+        );
+        let resp = router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/oauth/token")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = body_string(resp).await;
+        assert!(body.contains("invalid_grant"));
+    }
+
+    #[tokio::test]
+    async fn auth_code_is_single_use() {
+        let state = test_state();
+        let verifier = "vvv";
+        let challenge = challenge_for(verifier);
+        let auth_uri = format!(
+            "/authorize?response_type=code&client_id=test-id&redirect_uri=https%3A%2F%2Fclaude.ai%2Fapi%2Fmcp%2Fauth_callback&code_challenge={challenge}&code_challenge_method=S256&state=s",
+        );
+        let resp = router(state.clone())
+            .oneshot(Request::builder().uri(auth_uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let location = resp.headers().get(header::LOCATION).unwrap().to_str().unwrap().to_string();
+        let code = location.split_once("code=").and_then(|(_, r)| r.split('&').next()).unwrap().to_string();
+        let body = format!(
+            "grant_type=authorization_code&code={code}&redirect_uri=https%3A%2F%2Fclaude.ai%2Fapi%2Fmcp%2Fauth_callback&code_verifier={verifier}&client_id=test-id"
+        );
+        let make_req = || Request::builder()
+            .method("POST")
+            .uri("/oauth/token")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(Body::from(body.clone()))
+            .unwrap();
+        let first = router(state.clone()).oneshot(make_req()).await.unwrap();
+        assert_eq!(first.status(), StatusCode::OK);
+        let second = router(state).oneshot(make_req()).await.unwrap();
+        assert_eq!(second.status(), StatusCode::BAD_REQUEST);
     }
 }
