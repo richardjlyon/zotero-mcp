@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -108,8 +109,6 @@ impl PdfEngines {
     }
 }
 
-use std::time::Duration;
-
 /// Out-of-process PDF text extraction via Poppler's `pdftotext` binary.
 ///
 /// Used as the fallback when `pdf-extract` fails. Honors a wall-clock
@@ -129,6 +128,7 @@ impl PdftotextEngine {
         }
     }
 
+    #[doc(hidden)] // Test-only constructor (public for integration tests in tests/).
     pub fn with_timeout(binary: PathBuf, timeout: Duration) -> Self {
         Self { binary, timeout, max_bytes: 50 * 1024 * 1024 }
     }
@@ -166,7 +166,7 @@ impl PdfEngine for PdftotextEngine {
         });
         let stderr_task = tokio::spawn(async move {
             let mut buf = Vec::with_capacity(1024);
-            let mut limited = (&mut stderr_pipe).take(500);
+            let mut limited = (&mut stderr_pipe).take(4096);
             limited.read_to_end(&mut buf).await.map(|_| buf)
         });
 
@@ -197,6 +197,9 @@ impl PdfEngine for PdftotextEngine {
         }
 
         if stdout.is_empty() {
+            // Empty stdout most commonly means pdftotext failed silently; an
+            // image-only (scanned) PDF would also extract no text. We surface
+            // the same error in both cases — OCR is out of scope.
             return Err(EngineError::Failed("pdftotext produced empty output".into()));
         }
 
