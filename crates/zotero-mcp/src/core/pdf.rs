@@ -4,6 +4,7 @@ use crate::core::reader::attachments::resolve_path;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -74,6 +75,36 @@ impl PdfEngine for PdfExtractEngine {
             Err(je) if je.is_panic() => Err(EngineError::Failed(format!("pdf-extract panicked: {}", je))),
             Err(je) => Err(EngineError::Failed(format!("pdf-extract task cancelled: {}", je))),
         }
+    }
+}
+
+/// The two engines wired up for a running server. Construct once at
+/// startup with `PdfEngines::build(&cfg.zotero)`; cheap to clone (every
+/// field is `Arc`).
+#[derive(Clone)]
+pub struct PdfEngines {
+    primary: Arc<dyn PdfEngine>,
+    fallback: FallbackState,
+}
+
+#[derive(Clone)]
+pub enum FallbackState {
+    /// pdftotext is on PATH (or the config override resolved) and the
+    /// fallback is enabled.
+    Ready(Arc<dyn PdfEngine>),
+    /// Fallback is enabled in config but pdftotext was not found.
+    BinaryMissing,
+    /// User has explicitly disabled the fallback in config.
+    Disabled,
+}
+
+impl PdfEngines {
+    pub fn primary(&self) -> &Arc<dyn PdfEngine> {
+        &self.primary
+    }
+
+    pub fn fallback(&self) -> &FallbackState {
+        &self.fallback
     }
 }
 
