@@ -261,25 +261,14 @@ pub async fn get_pdf_text(
     parent_key: &str,
     library_id: i64,
     storage_dir: &Path,
+    engines: &PdfEngines,
 ) -> Result<PdfTextResult> {
     let pdf_path = resolve_path(pool, parent_key, library_id, storage_dir).await?;
-    let storage_item_dir = pdf_path.parent().ok_or_else(|| Error::AttachmentNotFound(parent_key.into()))?.to_path_buf();
-    extract(&pdf_path, &storage_item_dir).await
-}
-
-async fn extract(pdf_path: &Path, storage_item_dir: &Path) -> Result<PdfTextResult> {
-    let cache = storage_item_dir.join(".zotero-ft-cache");
-    if cache.exists() {
-        let text = tokio::fs::read_to_string(&cache).await?;
-        let n = text.chars().count();
-        return Ok(PdfTextResult { text, source: PdfTextSource::ZoteroCache, character_count: n });
-    }
-    let pdf_path = pdf_path.to_path_buf();
-    let text = tokio::task::spawn_blocking(move || {
-        pdf_extract::extract_text(&pdf_path).map_err(|e| Error::Pdf(e.to_string()))
-    }).await.map_err(|e| Error::Pdf(e.to_string()))??;
-    let n = text.chars().count();
-    Ok(PdfTextResult { text, source: PdfTextSource::LiveExtract, character_count: n })
+    let storage_item_dir = pdf_path
+        .parent()
+        .ok_or_else(|| Error::AttachmentNotFound(parent_key.into()))?
+        .to_path_buf();
+    extract(&pdf_path, &storage_item_dir, engines).await
 }
 
 pub async fn get_pdf_first_pages(
@@ -288,14 +277,115 @@ pub async fn get_pdf_first_pages(
     library_id: i64,
     storage_dir: &Path,
     n_pages: usize,
+    engines: &PdfEngines,
 ) -> Result<PdfTextResult> {
-    let full = get_pdf_text(pool, parent_key, library_id, storage_dir).await?;
-    // Approximate: take roughly 3500 chars per page from the cache, or use pdf-extract for true pages.
-    // First N pages estimate: 3500 chars/page; cap at full length.
+    let full = get_pdf_text(pool, parent_key, library_id, storage_dir, engines).await?;
     let cap = (n_pages * 3500).min(full.text.len());
     let mut text: String = full.text.chars().take(cap).collect();
-    if text.len() < full.text.len() { text.push_str("\n[... truncated ...]"); }
+    if text.len() < full.text.len() {
+        text.push_str("\n[... truncated ...]");
+    }
     Ok(PdfTextResult { text, source: full.source, character_count: cap })
+}
+
+/// Core orchestrator: cache check → primary engine → fallback engine.
+async fn extract(
+    pdf_path: &Path,
+    storage_item_dir: &Path,
+    engines: &PdfEngines,
+) -> Result<PdfTextResult> {
+    // 1. Cache hit.
+    let cache = storage_item_dir.join(".zotero-ft-cache");
+    if cache.exists() {
+        let text = tokio::fs::read_to_string(&cache).await?;
+        let n = text.chars().count();
+        return Ok(PdfTextResult {
+            text,
+            source: PdfTextSource::ZoteroCache,
+            character_count: n,
+        });
+    }
+
+    // 2. Primary engine.
+    let primary_err = match engines.primary().extract(pdf_path).await {
+        Ok(text) => {
+            let n = text.chars().count();
+            return Ok(PdfTextResult {
+                text,
+                source: PdfTextSource::LiveExtract,
+                character_count: n,
+            });
+        }
+        Err(e) => e.to_string(),
+    };
+
+    // 3. Fallback engine.
+    let fallback = match engines.fallback() {
+        FallbackState::Ready(eng) => eng,
+        FallbackState::Disabled => {
+            return Err(Error::Pdf(primary_err));
+        }
+        FallbackState::BinaryMissing => {
+            tracing::warn!(
+                error = %primary_err,
+                path = %pdf_path.display(),
+                "pdf-extract failed and pdftotext fallback is unavailable"
+            );
+            return Err(Error::PdftotextMissing);
+        }
+    };
+
+    tracing::warn!(
+        error = %primary_err,
+        path = %pdf_path.display(),
+        "pdf-extract failed; trying pdftotext fallback"
+    );
+
+    let text = match fallback.extract(pdf_path).await {
+        Ok(t) => t,
+        Err(EngineError::Timeout(secs)) => {
+            return Err(Error::PdftotextTimeout(secs, pdf_path.display().to_string()));
+        }
+        Err(EngineError::Failed(msg)) => {
+            return Err(Error::PdfAllEnginesFailed {
+                pdf_extract: primary_err,
+                pdftotext: msg,
+            });
+        }
+    };
+
+    // 4. Cache write (best-effort).
+    if let Err(e) = write_cache_atomic(&cache, &text).await {
+        tracing::warn!(
+            path = %cache.display(),
+            error = %e,
+            "failed to write .zotero-ft-cache after pdftotext fallback"
+        );
+    } else {
+        tracing::debug!(
+            path = %cache.display(),
+            "wrote .zotero-ft-cache after pdftotext fallback"
+        );
+    }
+
+    let n = text.chars().count();
+    Ok(PdfTextResult {
+        text,
+        source: PdfTextSource::PdftotextFallback,
+        character_count: n,
+    })
+}
+
+/// Write the cache via tmp-file + rename so a kill mid-write doesn't leave
+/// a partial cache for Zotero to consume.
+async fn write_cache_atomic(cache: &Path, text: &str) -> std::io::Result<()> {
+    let tmp = cache.with_file_name(".zotero-ft-cache.tmp");
+    let mut content = text.to_owned();
+    if !content.ends_with('\n') {
+        content.push('\n');
+    }
+    tokio::fs::write(&tmp, content).await?;
+    tokio::fs::rename(&tmp, cache).await
 }
 
 pub fn cache_path_for(storage_dir: &Path, parent_key: &str) -> PathBuf {

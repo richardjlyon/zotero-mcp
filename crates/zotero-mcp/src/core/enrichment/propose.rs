@@ -77,13 +77,14 @@ pub struct ProposeInput<'a> {
     pub library_id: i64,
     pub storage_dir: &'a Path,
     pub candidates: Vec<NormalizedRecord>,
+    pub engines: &'a crate::core::pdf::PdfEngines,
 }
 
 pub async fn propose_metadata_update(pool: &ReadOnlyPool, inp: ProposeInput<'_>) -> Result<EnrichmentProposal> {
     let item = get_item_by_key(pool, inp.item_key, inp.library_id).await?;
 
     // Pull PDF first-page signals if we have a PDF attachment
-    let signals = match get_pdf_first_pages(pool, inp.item_key, inp.library_id, inp.storage_dir, 1).await {
+    let signals = match get_pdf_first_pages(pool, inp.item_key, inp.library_id, inp.storage_dir, 1, inp.engines).await {
         Ok(p) => crate::core::enrichment::pdf_signals::extract_signals(&p.text),
         Err(_) => PdfSignals::default(),
     };
@@ -146,6 +147,7 @@ pub struct EnrichInput<'a> {
     pub storage_dir: &'a Path,
     pub candidates: Vec<NormalizedRecord>,
     pub auto_apply_threshold: f64,
+    pub engines: &'a crate::core::pdf::PdfEngines,
 }
 
 pub async fn enrich_item(api: &LocalApi, pool: &ReadOnlyPool, inp: EnrichInput<'_>) -> Result<EnrichmentProposal> {
@@ -155,6 +157,7 @@ pub async fn enrich_item(api: &LocalApi, pool: &ReadOnlyPool, inp: EnrichInput<'
         library_id: inp.library_id,
         storage_dir: inp.storage_dir,
         candidates: inp.candidates,
+        engines: inp.engines,
     }).await?;
     if proposal.confidence >= auto && !proposal.needs_review {
         apply_metadata_update(api, pool, inp.library_id, &proposal).await?;

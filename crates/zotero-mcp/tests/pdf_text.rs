@@ -1,12 +1,13 @@
 mod fixtures;
 use zotero_mcp::core::reader::pool::ReadOnlyPool;
-use zotero_mcp::core::pdf::{get_pdf_text, PdfTextSource};
+use zotero_mcp::core::pdf::{get_pdf_text, PdfEngines, PdfTextSource};
 
 #[tokio::test]
 async fn prefers_zotero_ft_cache_when_present() {
     let f = fixtures::build_fixture::build();
     let pool = ReadOnlyPool::new(f.sqlite_path(), 2).await.unwrap();
-    let res = get_pdf_text(&pool, "AAAA0001", 1, &f.storage_dir()).await.unwrap();
+    let engines = PdfEngines::build(&zotero_mcp::core::config::Config::default().zotero);
+    let res = get_pdf_text(&pool, "AAAA0001", 1, &f.storage_dir(), &engines).await.unwrap();
     assert!(matches!(res.source, PdfTextSource::ZoteroCache));
     assert!(res.text.contains("zoteroconnectortest"));
 }

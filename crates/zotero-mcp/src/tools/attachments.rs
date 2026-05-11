@@ -33,7 +33,7 @@ pub async fn get_pdf_path(s: &AppState, a: ItemKeyArgs) -> Result<CallToolResult
 }
 
 pub async fn get_pdf_text_t(s: &AppState, a: ItemKeyArgs) -> Result<CallToolResult, Error> {
-    let r = get_pdf_text(&s.pool, &a.item_key, 1, &s.cfg.storage_dir())
+    let r = get_pdf_text(&s.pool, &a.item_key, 1, &s.cfg.storage_dir(), &s.pdf_engines)
         .await
         .map_err(map_err)?;
     Ok(CallToolResult::success(vec![Content::json(
@@ -52,7 +52,7 @@ fn two() -> usize {
 }
 
 pub async fn get_pdf_first_pages_t(s: &AppState, a: FirstPagesArgs) -> Result<CallToolResult, Error> {
-    let r = get_pdf_first_pages(&s.pool, &a.item_key, 1, &s.cfg.storage_dir(), a.n)
+    let r = get_pdf_first_pages(&s.pool, &a.item_key, 1, &s.cfg.storage_dir(), a.n, &s.pdf_engines)
         .await
         .map_err(map_err)?;
     Ok(CallToolResult::success(vec![Content::json(

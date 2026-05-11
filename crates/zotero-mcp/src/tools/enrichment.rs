@@ -141,6 +141,7 @@ pub async fn propose_metadata_update_t(
             library_id: 1,
             storage_dir: &storage_dir,
             candidates,
+            engines: &s.pdf_engines,
         },
     )
     .await
@@ -192,6 +193,7 @@ pub async fn enrich_item_t(s: &AppState, a: EnrichArgs) -> Result<CallToolResult
             storage_dir: &storage_dir,
             candidates,
             auto_apply_threshold: threshold,
+            engines: &s.pdf_engines,
         },
     )
     .await
