@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.zotero-mcp.http</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/sh</string>
+        <string>-c</string>
+        <string>export ZOTERO_MCP_BEARER_TOKEN="$(cat /Users/rjl/.config/zotero-mcp/token)"; exec /Users/rjl/.cargo/bin/zotero-mcp</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>ZOTERO_MCP_HTTP</key>
+        <string>127.0.0.1:8765</string>
+        <key>RUST_LOG</key>
+        <string>info</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Users/rjl/Library/Logs/zotero-mcp/http.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/rjl/Library/Logs/zotero-mcp/http.err.log</string>
+</dict>
+</plist>
