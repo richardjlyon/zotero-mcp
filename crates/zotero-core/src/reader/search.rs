@@ -8,6 +8,7 @@ pub struct SearchParams {
     pub item_type: Option<String>,
     pub tag: Option<String>,
     pub collection_key: Option<String>,
+    pub include_fulltext: bool,
     pub limit: i64,
     pub offset: i64,
 }
@@ -44,13 +45,27 @@ pub async fn search_metadata(
         let mut binds: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(library_id)];
 
         if !q.is_empty() {
-            sql.push_str(" AND (
+            let mut clause = String::from(" AND (
                 EXISTS (SELECT 1 FROM itemData d JOIN itemDataValues v ON v.valueID = d.valueID
                         WHERE d.itemID = i.itemID AND v.value LIKE ?)
                 OR cr.lastName LIKE ? OR cr.firstName LIKE ?
-                OR tg.name LIKE ?
-            )");
+                OR tg.name LIKE ?");
             for _ in 0..4 { binds.push(Box::new(q_like.clone())); }
+
+            if params.include_fulltext && !q.contains(char::is_whitespace) {
+                clause.push_str(" OR i.key IN (
+                    SELECT DISTINCT parent.key
+                    FROM fulltextWords fw
+                    JOIN fulltextItemWords fiw ON fiw.wordID = fw.wordID
+                    JOIN itemAttachments a ON a.itemID = fiw.itemID
+                    JOIN items parent ON parent.itemID = a.parentItemID
+                    WHERE parent.libraryID = ? AND fw.word = LOWER(?)
+                )");
+                binds.push(Box::new(library_id));
+                binds.push(Box::new(q.to_string()));
+            }
+            clause.push(')');
+            sql.push_str(&clause);
         }
 
         if let Some(t) = &params.item_type {
