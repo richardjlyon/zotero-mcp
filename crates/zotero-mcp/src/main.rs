@@ -29,26 +29,14 @@ async fn main() -> anyhow::Result<()> {
         let token = std::env::var("ZOTERO_MCP_BEARER_TOKEN")
             .ok()
             .filter(|s| !s.is_empty());
-        // Task B/D: OAuth 2.1 surface. Stopgap env-var config until Task D
-        // moves it onto disk. All three must be present to enable OAuth.
-        let oauth_state = match (
-            std::env::var("ZOTERO_MCP_OAUTH_CLIENT_ID").ok(),
-            std::env::var("ZOTERO_MCP_OAUTH_CLIENT_SECRET").ok(),
-            std::env::var("ZOTERO_MCP_OAUTH_ISSUER").ok(),
-        ) {
-            (Some(client_id), Some(client_secret), Some(issuer))
-                if !client_id.is_empty()
-                    && !client_secret.is_empty()
-                    && !issuer.is_empty() =>
-            {
-                Some(oauth::OAuthState::new(oauth::OAuthConfig {
-                    client_id,
-                    client_secret,
-                    issuer,
-                }))
-            }
-            _ => None,
-        };
+        // OAuth 2.1 client credentials. Load from <config_dir>/oauth.toml; if
+        // missing, generate iff ZOTERO_MCP_OAUTH_ISSUER is set (one-time
+        // bootstrap that writes the file with mode 0600). Otherwise, OAuth is
+        // disabled — the server runs without an auth gate, as before.
+        let issuer_hint =
+            std::env::var("ZOTERO_MCP_OAUTH_ISSUER").ok().filter(|s| !s.is_empty());
+        let oauth_state = oauth::OAuthConfig::load_or_generate(issuer_hint)?
+            .map(oauth::OAuthState::new);
         let addr: SocketAddr = bind
             .parse()
             .map_err(|e| anyhow::anyhow!("ZOTERO_MCP_HTTP must be host:port, got {bind:?}: {e}"))?;

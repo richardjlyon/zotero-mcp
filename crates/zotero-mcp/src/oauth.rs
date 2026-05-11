@@ -9,6 +9,7 @@
 //! endpoints; both are served unauthenticated.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -25,10 +26,10 @@ use tokio::sync::RwLock;
 
 const TOKEN_TTL_SECS: u64 = 3600;
 
-/// Pre-shared OAuth client credentials loaded from config or env. Task D moves
-/// this onto disk; for now it can also come from environment variables so the
-/// path is testable in isolation.
-#[derive(Clone, Debug)]
+/// Pre-shared OAuth client credentials. Persisted at
+/// `<config_dir>/oauth.toml` with mode 0600 so the secret never lands in a
+/// world-readable location.
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct OAuthConfig {
     pub client_id: String,
     pub client_secret: String,
@@ -36,6 +37,93 @@ pub struct OAuthConfig {
     /// metadata URL in 401 challenges. Must match what the client believes the
     /// canonical URI is (e.g. the Tailscale Funnel hostname).
     pub issuer: String,
+}
+
+/// Location of the on-disk OAuth config. Uses the same ProjectDirs convention
+/// as `zotero-core::Config::config_path` so users find both files in the same
+/// directory (`~/Library/Application Support/dev.zotero-mcp.zotero-mcp` on
+/// macOS, `~/.config/zotero-mcp` on Linux).
+pub fn config_path() -> Option<PathBuf> {
+    directories::ProjectDirs::from("dev", "zotero-mcp", "zotero-mcp")
+        .map(|d| d.config_dir().join("oauth.toml"))
+}
+
+impl OAuthConfig {
+    /// Resolve credentials. Precedence:
+    /// 1. If `<config_dir>/oauth.toml` exists, load it.
+    /// 2. Otherwise, if `issuer_hint` is `Some`, generate a fresh credential
+    ///    pair (random client_id + 32-byte hex client_secret), persist it
+    ///    with mode 0600, and return it. The generated values are logged to
+    ///    stderr so the user can paste them into the Claude.ai connector.
+    /// 3. Otherwise, return `Ok(None)` — OAuth is opt-in; without an issuer
+    ///    we cannot generate a sensible config.
+    pub fn load_or_generate(issuer_hint: Option<String>) -> anyhow::Result<Option<Self>> {
+        let Some(path) = config_path() else {
+            tracing::warn!("could not resolve ProjectDirs for OAuth config; OAuth disabled");
+            return Ok(None);
+        };
+
+        if path.exists() {
+            let bytes = std::fs::read(&path)
+                .map_err(|e| anyhow::anyhow!("read {}: {e}", path.display()))?;
+            let config: OAuthConfig = toml::from_str(std::str::from_utf8(&bytes)?)
+                .map_err(|e| anyhow::anyhow!("parse {}: {e}", path.display()))?;
+            tracing::info!(path = %path.display(), "loaded OAuth config");
+            return Ok(Some(config));
+        }
+
+        let Some(issuer) = issuer_hint else {
+            tracing::warn!(
+                path = %path.display(),
+                "OAuth config not found and no ZOTERO_MCP_OAUTH_ISSUER set; OAuth disabled"
+            );
+            return Ok(None);
+        };
+
+        let config = OAuthConfig {
+            client_id: format!("zotero-mcp-{}", short_id()),
+            client_secret: format!("{:032x}", rand::random::<u128>()),
+            issuer,
+        };
+        Self::write_secure(&path, &config)?;
+        tracing::warn!(
+            path = %path.display(),
+            client_id = %config.client_id,
+            "generated OAuth credentials — paste these into the Claude.ai connector's Advanced fields"
+        );
+        // Also print to stderr so the message is visible on the very first run
+        // even if the logger threshold filters out warnings.
+        eprintln!(
+            "\n=== zotero-mcp OAuth credentials generated at {} ===\n  client_id     = {}\n  client_secret = {}\n  issuer        = {}\n  → paste client_id + client_secret into Claude.ai connector → Advanced → OAuth fields\n",
+            path.display(),
+            config.client_id,
+            config.client_secret,
+            config.issuer,
+        );
+        Ok(Some(config))
+    }
+
+    fn write_secure(path: &std::path::Path, config: &OAuthConfig) -> anyhow::Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| anyhow::anyhow!("mkdir {}: {e}", parent.display()))?;
+        }
+        let serialized = toml::to_string_pretty(config)?;
+        std::fs::write(path, serialized)
+            .map_err(|e| anyhow::anyhow!("write {}: {e}", path.display()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = std::fs::Permissions::from_mode(0o600);
+            std::fs::set_permissions(path, perms)
+                .map_err(|e| anyhow::anyhow!("chmod 0600 {}: {e}", path.display()))?;
+        }
+        Ok(())
+    }
+}
+
+fn short_id() -> String {
+    format!("{:08x}", rand::random::<u32>())
 }
 
 /// Shared runtime state for the OAuth surface. Cheaply cloneable.
@@ -281,6 +369,40 @@ mod tests {
     use axum::body::{Body, to_bytes};
     use axum::http::Request;
     use tower::ServiceExt;
+
+    #[test]
+    fn config_roundtrips_through_disk_with_secure_perms() {
+        let dir = tempdir();
+        let path = dir.join("oauth.toml");
+        let original = OAuthConfig {
+            client_id: "id-x".into(),
+            client_secret: "secret-y".into(),
+            issuer: "https://example.test".into(),
+        };
+        OAuthConfig::write_secure(&path, &original).unwrap();
+
+        let bytes = std::fs::read(&path).unwrap();
+        let parsed: OAuthConfig = toml::from_str(std::str::from_utf8(&bytes).unwrap()).unwrap();
+        assert_eq!(parsed.client_id, "id-x");
+        assert_eq!(parsed.client_secret, "secret-y");
+        assert_eq!(parsed.issuer, "https://example.test");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "file should be readable only by owner");
+        }
+    }
+
+    fn tempdir() -> PathBuf {
+        let p = std::env::temp_dir().join(format!(
+            "zotero-mcp-test-{}",
+            rand::random::<u64>()
+        ));
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
 
     fn test_state() -> OAuthState {
         OAuthState::new(OAuthConfig {
