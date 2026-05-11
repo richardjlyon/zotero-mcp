@@ -108,6 +108,103 @@ impl PdfEngines {
     }
 }
 
+use std::time::Duration;
+
+/// Out-of-process PDF text extraction via Poppler's `pdftotext` binary.
+///
+/// Used as the fallback when `pdf-extract` fails. Honors a wall-clock
+/// timeout and caps captured output at `max_bytes` to bound memory.
+pub struct PdftotextEngine {
+    binary: PathBuf,
+    timeout: Duration,
+    max_bytes: usize,
+}
+
+impl PdftotextEngine {
+    pub fn new(binary: PathBuf) -> Self {
+        Self {
+            binary,
+            timeout: Duration::from_secs(60),
+            max_bytes: 50 * 1024 * 1024,
+        }
+    }
+
+    pub fn with_timeout(binary: PathBuf, timeout: Duration) -> Self {
+        Self { binary, timeout, max_bytes: 50 * 1024 * 1024 }
+    }
+}
+
+#[async_trait]
+impl PdfEngine for PdftotextEngine {
+    async fn extract(&self, path: &Path) -> std::result::Result<String, EngineError> {
+        use tokio::io::AsyncReadExt;
+        use tokio::process::Command;
+
+        let mut child = Command::new(&self.binary)
+            .arg("-enc").arg("UTF-8")
+            .arg("-q")
+            .arg("--")
+            .arg(path)
+            .arg("-")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|e| EngineError::Failed(format!("failed to spawn pdftotext: {}", e)))?;
+
+        let mut stdout_pipe = child.stdout.take()
+            .ok_or_else(|| EngineError::Failed("pdftotext stdout missing".into()))?;
+        let mut stderr_pipe = child.stderr.take()
+            .ok_or_else(|| EngineError::Failed("pdftotext stderr missing".into()))?;
+
+        let max_bytes = self.max_bytes;
+        let stdout_task = tokio::spawn(async move {
+            let mut buf = Vec::with_capacity(64 * 1024);
+            let mut limited = (&mut stdout_pipe).take(max_bytes as u64);
+            limited.read_to_end(&mut buf).await.map(|_| buf)
+        });
+        let stderr_task = tokio::spawn(async move {
+            let mut buf = Vec::with_capacity(1024);
+            let mut limited = (&mut stderr_pipe).take(500);
+            limited.read_to_end(&mut buf).await.map(|_| buf)
+        });
+
+        let timeout_secs = self.timeout.as_secs();
+        let extraction = async move {
+            let status = child.wait().await.map_err(|e| format!("pdftotext wait failed: {}", e))?;
+            let stdout = stdout_task.await
+                .map_err(|e| format!("pdftotext stdout task panicked: {}", e))?
+                .map_err(|e| format!("pdftotext stdout read failed: {}", e))?;
+            let stderr = stderr_task.await
+                .map_err(|e| format!("pdftotext stderr task panicked: {}", e))?
+                .map_err(|e| format!("pdftotext stderr read failed: {}", e))?;
+            Ok::<_, String>((status, stdout, stderr))
+        };
+
+        let (status, stdout, stderr) = match tokio::time::timeout(self.timeout, extraction).await {
+            Ok(Ok(t)) => t,
+            Ok(Err(msg)) => return Err(EngineError::Failed(msg)),
+            Err(_) => return Err(EngineError::Timeout(timeout_secs)),
+        };
+
+        if !status.success() {
+            let serr = String::from_utf8_lossy(&stderr);
+            return Err(EngineError::Failed(format!(
+                "pdftotext exited {}: {}",
+                status, serr.trim()
+            )));
+        }
+
+        if stdout.is_empty() {
+            return Err(EngineError::Failed("pdftotext produced empty output".into()));
+        }
+
+        String::from_utf8(stdout)
+            .map_err(|e| EngineError::Failed(format!("pdftotext output not valid UTF-8: {}", e)))
+    }
+}
+
 pub async fn get_pdf_text(
     pool: &ReadOnlyPool,
     parent_key: &str,
