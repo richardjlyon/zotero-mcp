@@ -82,7 +82,7 @@ impl OAuthState {
         map.get(token).is_some_and(|exp| *exp > now)
     }
 
-    async fn mint_token(&self) -> (String, u64) {
+    pub(crate) async fn mint_token(&self) -> (String, u64) {
         let token = format!("{:032x}", rand::random::<u128>());
         let exp = unix_now() + TOKEN_TTL_SECS;
         self.inner

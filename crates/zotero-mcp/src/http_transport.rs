@@ -21,7 +21,7 @@ use axum::{
     Json, Router,
     extract::{Query, Request, State},
     http::StatusCode,
-    response::sse::{Event, KeepAlive, Sse},
+    response::{IntoResponse, sse::{Event, KeepAlive, Sse}},
     routing::{get, post},
 };
 use futures::{SinkExt, StreamExt};
@@ -138,15 +138,26 @@ pub async fn run(
         state,
         txs: Default::default(),
     };
-    let resource_routes = Router::new()
+    let mut resource_routes = Router::new()
         .route("/sse", get(sse_handler))
         .route("/message", post(post_handler))
         .with_state(shared);
 
+    // OAuth bearer-token enforcement only applies to the resource routes
+    // (/sse, /message). Discovery and /oauth/token must stay reachable
+    // unauthenticated for the OAuth handshake itself to work.
+    if let Some(oauth_state) = oauth_state.clone() {
+        resource_routes = resource_routes
+            .layer(axum::middleware::from_fn_with_state(
+                oauth_state,
+                require_bearer_token,
+            ));
+    }
+
     let mut app = Router::new().merge(resource_routes);
     if let Some(oauth_state) = oauth_state {
         app = app.merge(oauth::router(oauth_state));
-        tracing::info!("OAuth 2.1 surface mounted (discovery + /oauth/token)");
+        tracing::info!("OAuth 2.1 surface mounted (discovery + /oauth/token + bearer gate on /sse, /message)");
     }
     let mut app = app
         // Task A probe instrumentation: log every request that doesn't match a
@@ -160,24 +171,69 @@ pub async fn run(
         .layer(tower_http::trace::TraceLayer::new_for_http());
 
     if let Some(token) = bearer {
-        // tower-http marks the simple `bearer` constructor as deprecated in
-        // favour of writing a custom validator, but a constant-time
-        // shared-secret check is exactly what we want here.
+        // Legacy shared-secret bearer auth, preserved for environments that
+        // still pin a single static token via ZOTERO_MCP_BEARER_TOKEN. Applies
+        // to every route (including discovery), so do not combine with the
+        // OAuth flow.
         #[allow(deprecated)]
         let auth = ValidateRequestHeaderLayer::bearer(&token);
         app = app.layer(auth);
-        tracing::info!(%addr, "zotero-mcp HTTP/SSE transport listening (bearer auth enabled)");
+        tracing::info!(%addr, "zotero-mcp HTTP/SSE transport listening (static bearer auth enabled)");
     } else {
         tracing::warn!(
             %addr,
-            "zotero-mcp HTTP/SSE transport listening WITHOUT auth — \
-             rely on transport-level access control (e.g. Tailscale Funnel privacy)"
+            "zotero-mcp HTTP/SSE transport listening WITHOUT static bearer — \
+             OAuth gates /sse and /message if configured; otherwise transport-level access control applies"
         );
     }
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+/// Per-request guard for the resource routes. Reads the `Authorization`
+/// header, validates the bearer token against the in-memory token store, and
+/// either passes the request through or returns `401 Unauthorized` with a
+/// `WWW-Authenticate` challenge that points clients at the resource metadata
+/// document (RFC 9728 §5.1). On failure clients are expected to fetch
+/// `resource_metadata`, walk to the advertised authorization server, and call
+/// `/oauth/token` to acquire a token.
+async fn require_bearer_token(
+    axum::extract::State(oauth_state): axum::extract::State<OAuthState>,
+    req: Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let bearer = req
+        .headers()
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|h| h.to_str().ok())
+        .and_then(|h| h.strip_prefix("Bearer "));
+
+    if let Some(token) = bearer {
+        if oauth_state.validate_token(token.trim()).await {
+            return next.run(req).await;
+        }
+    }
+
+    let challenge = format!(
+        "Bearer realm=\"zotero-mcp\", resource_metadata=\"{}\", scope=\"mcp\"",
+        oauth_state.resource_metadata_url()
+    );
+    let (status, error) = if bearer.is_some() {
+        (StatusCode::UNAUTHORIZED, "invalid_token")
+    } else {
+        (StatusCode::UNAUTHORIZED, "missing_token")
+    };
+    tracing::info!(error, "bearer auth failed");
+    (
+        status,
+        [(
+            axum::http::header::WWW_AUTHENTICATE,
+            challenge.as_str(),
+        )],
+    )
+        .into_response()
 }
 
 /// Task A probe instrumentation. Removed in Task F.
@@ -205,4 +261,89 @@ async fn probe_log_headers(
         "probe: request received"
     );
     next.run(req).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::oauth::{OAuthConfig, OAuthState};
+    use axum::body::Body;
+    use axum::http::Request as HttpRequest;
+    use tower::ServiceExt;
+
+    fn test_oauth_state() -> OAuthState {
+        OAuthState::new(OAuthConfig {
+            client_id: "test-id".into(),
+            client_secret: "test-secret".into(),
+            issuer: "https://example.test".into(),
+        })
+    }
+
+    /// Build a router that mirrors the bearer-gated portion of `run`, without
+    /// requiring `AppState`. The /sse route is replaced with a stub so we can
+    /// observe whether the middleware lets the request through.
+    fn protected_router(oauth_state: OAuthState) -> Router {
+        Router::new()
+            .route("/sse", get(|| async { StatusCode::OK }))
+            .layer(axum::middleware::from_fn_with_state(
+                oauth_state,
+                require_bearer_token,
+            ))
+    }
+
+    #[tokio::test]
+    async fn missing_token_returns_401_with_www_authenticate() {
+        let app = protected_router(test_oauth_state());
+        let resp = app
+            .oneshot(HttpRequest::builder().uri("/sse").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        let challenge = resp
+            .headers()
+            .get(axum::http::header::WWW_AUTHENTICATE)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(challenge.starts_with("Bearer "));
+        assert!(challenge.contains("realm=\"zotero-mcp\""));
+        assert!(challenge.contains(
+            "resource_metadata=\"https://example.test/.well-known/oauth-protected-resource\""
+        ));
+        assert!(challenge.contains("scope=\"mcp\""));
+    }
+
+    #[tokio::test]
+    async fn invalid_bearer_returns_401() {
+        let app = protected_router(test_oauth_state());
+        let resp = app
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/sse")
+                    .header("authorization", "Bearer not-a-real-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn minted_bearer_passes_through() {
+        let oauth_state = test_oauth_state();
+        let (token, _ttl) = oauth_state.mint_token().await;
+        let app = protected_router(oauth_state);
+        let resp = app
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/sse")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
 }
