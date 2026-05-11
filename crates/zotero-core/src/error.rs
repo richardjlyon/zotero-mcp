@@ -37,8 +37,8 @@ pub enum Error {
     #[error("html extraction failed: {0}")]
     Html(String),
 
-    #[error("external lookup failed for source {}: {}", .0, .1)]
-    Lookup(String, String),
+    #[error("external lookup failed for source {source}: {message}")]
+    Lookup { r#source: String, message: String },
 
     #[error("config error: {0}")]
     Config(String),
