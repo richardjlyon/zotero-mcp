@@ -24,12 +24,14 @@ async fn refetches_and_saves_snapshot() {
     }
 
     let api_server = MockServer::start().await;
-    Mock::given(method("POST")).and(path("/api/users/93338/items"))
+    Mock::given(method("POST")).and(path("/users/93338/items"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "successful": {"0": {"key": "SNAP0001", "version": 7}}
         }))).mount(&api_server).await;
 
-    let api = LocalApi::new(api_server.uri(), 93338).unwrap();
+    let api = LocalApi::new("http://unused", 93338).unwrap()
+        .with_web_base(api_server.uri())
+        .with_api_key("test-key");
     let r = refetch_url(&pool, Some(&api), "WEB00001", 1, true, "test/0.1").await.unwrap();
     assert_eq!(r.saved_attachment_key.as_deref(), Some("SNAP0001"));
     assert!(r.text.to_lowercase().contains("body"));

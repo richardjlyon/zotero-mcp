@@ -162,8 +162,11 @@ async fn create_html_snapshot_attachment(api: &LocalApi, parent_key: &str, url: 
         "contentType": "text/html",
         "note": format!("Refetched at {} by zotero-mcp; {} bytes", now_iso8601(), html.len())
     }]);
-    let url_e = api.user_path("/items");
-    let resp = api.http.post(&url_e).header("Zotero-API-Version", "3").json(&body).send().await?;
+    let resp = api
+        .write_request(reqwest::Method::POST, "/items")?
+        .json(&body)
+        .send()
+        .await?;
     if !resp.status().is_success() {
         return Err(Error::LocalApi { status: resp.status().as_u16(), body: resp.text().await.unwrap_or_default() });
     }

@@ -25,6 +25,13 @@ pub enum Error {
     #[error("local API error {status}: {body}")]
     LocalApi { status: u16, body: String },
 
+    #[error(
+        "writes require a Zotero Web API key. Create one at \
+         https://www.zotero.org/settings/keys (give it library:write) and set \
+         `[zotero] api_key = \"...\"` in zotero-mcp's config.toml."
+    )]
+    WriteApiKeyMissing,
+
     #[error("better-bibtex JSON-RPC unavailable")]
     BbtUnavailable,
 

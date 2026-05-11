@@ -4,6 +4,13 @@ edition.workspace = true
 version.workspace = true
 license.workspace = true
 repository.workspace = true
+authors.workspace = true
+description = "Local-first MCP server bridging Claude to your Zotero library — search, read, cite, enrich, write — over stdio or HTTP/SSE with OAuth 2.1."
+readme = "../../README.md"
+homepage = "https://github.com/richardjlyon/zotero-mcp"
+documentation = "https://docs.rs/zotero-mcp"
+keywords = ["zotero", "mcp", "claude", "research", "citations"]
+categories = ["command-line-utilities", "science", "api-bindings"]
 
 [lib]
 name = "zotero_mcp"

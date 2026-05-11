@@ -7,7 +7,7 @@ use zotero_mcp::core::writer::notes::add_note;
 async fn posts_a_child_note_against_parent() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
-        .and(path("/api/users/93338/items"))
+        .and(path("/users/93338/items"))
         .and(header("Zotero-API-Version", "3"))
         .and(body_partial_json(serde_json::json!([{
             "itemType": "note",
@@ -18,7 +18,7 @@ async fn posts_a_child_note_against_parent() {
         })))
         .mount(&server).await;
 
-    let api = LocalApi::new(server.uri(), 93338).unwrap();
+    let api = LocalApi::new("http://unused", 93338).unwrap().with_web_base(server.uri()).with_api_key("test-key");
     let new_key = add_note(&api, "JGF2UTMW", "# Heading\n\nSome **markdown**.").await.unwrap();
     assert_eq!(new_key, "NEWN0001");
 }

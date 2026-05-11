@@ -1,5 +1,6 @@
 use crate::core::error::{Error, Result};
 use crate::core::writer::client::LocalApi;
+use reqwest::Method;
 use serde_json::{json, Value};
 
 /// Adds a child note to a parent item. Markdown is wrapped in <p>; Zotero's
@@ -20,11 +21,11 @@ pub async fn add_note(api: &LocalApi, parent_key: &str, markdown_or_html: &str) 
         "tags": [],
         "relations": {}
     }]);
-    let url = api.user_path("/items");
-    let resp = api.http.post(&url)
-        .header("Zotero-API-Version", "3")
+    let resp = api
+        .write_request(Method::POST, "/items")?
         .json(&body)
-        .send().await?;
+        .send()
+        .await?;
     let status = resp.status();
     let v: Value = resp.json().await?;
     if !status.is_success() {

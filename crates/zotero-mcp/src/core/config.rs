@@ -29,6 +29,14 @@ impl Default for Config {
 pub struct ZoteroConfig {
     pub data_dir: String,
     pub local_api_base: String,
+    /// Base URL of the Zotero Web API used for writes. Zotero's local HTTP
+    /// server is read-only (returns 501 on PATCH/POST), so writes must go
+    /// through the cloud API and propagate back via sync.
+    pub web_api_base: String,
+    /// User Zotero API key from <https://www.zotero.org/settings/keys>.
+    /// Required for any write operation. Reads do not need it. Sensitive;
+    /// treat like a password.
+    pub api_key: Option<String>,
     pub user_id: i64,
     pub include_group_libraries: bool,
     pub min_schema_userdata: i64,
@@ -40,6 +48,8 @@ impl Default for ZoteroConfig {
         Self {
             data_dir: "~/Zotero".into(),
             local_api_base: "http://localhost:23119".into(),
+            web_api_base: "https://api.zotero.org".into(),
+            api_key: None,
             user_id: 0,
             include_group_libraries: true,
             min_schema_userdata: 120,

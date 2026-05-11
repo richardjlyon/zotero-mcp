@@ -38,7 +38,11 @@ impl AppState {
         } else {
             detect_user_id(&pool, &cfg.zotero.local_api_base).await?
         };
-        let api = LocalApi::new(cfg.zotero.local_api_base.clone(), user_id)?;
+        let mut api = LocalApi::new(cfg.zotero.local_api_base.clone(), user_id)?
+            .with_web_base(cfg.zotero.web_api_base.clone());
+        if let Some(key) = cfg.zotero.api_key.clone() {
+            api = api.with_api_key(key);
+        }
         let bbt = BbtClient::new(cfg.zotero.local_api_base.clone())
             .ok()
             .map(Arc::new);

@@ -1,13 +1,23 @@
 use crate::core::error::{Error, Result};
 use crate::core::writer::client::LocalApi;
 use crate::core::writer::items::update_item_fields;
+use reqwest::Method;
 use serde_json::{json, Value};
 
+/// Fetch tags/collections/version from the **web** API so the version we use
+/// for `If-Unmodified-Since-Version` matches the server we're about to write
+/// against. Reading from the local DB risks a 412 if local is behind the
+/// cloud (sync hasn't run since the last edit elsewhere).
 async fn fetch_item_meta(api: &LocalApi, key: &str) -> Result<(Vec<String>, Vec<String>, i64)> {
-    let url = api.user_path(&format!("/items/{}", key));
-    let resp = api.http.get(&url).header("Zotero-API-Version", "3").send().await?;
+    let resp = api
+        .write_request(Method::GET, &format!("/items/{key}"))?
+        .send()
+        .await?;
     if !resp.status().is_success() {
-        return Err(Error::LocalApi { status: resp.status().as_u16(), body: resp.text().await.unwrap_or_default() });
+        return Err(Error::LocalApi {
+            status: resp.status().as_u16(),
+            body: resp.text().await.unwrap_or_default(),
+        });
     }
     let v: Value = resp.json().await?;
     let data = v.get("data").cloned().unwrap_or_default();
