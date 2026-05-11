@@ -41,6 +41,23 @@ pub enum Error {
     #[error("pdf extraction failed: {0}")]
     Pdf(String),
 
+    #[error(
+        "pdftotext fallback unavailable: install Poppler \
+         (`brew install poppler` on macOS, `apt install poppler-utils` on Linux), \
+         or set `[zotero] pdftotext_path = \"...\"` in config.toml"
+    )]
+    PdftotextMissing,
+
+    #[error("pdftotext timed out after {0}s extracting {1}")]
+    PdftotextTimeout(u64, String),
+
+    #[error(
+        "pdf extraction failed in all engines. \
+         pdf-extract: {pdf_extract}. \
+         pdftotext: {pdftotext}"
+    )]
+    PdfAllEnginesFailed { pdf_extract: String, pdftotext: String },
+
     #[error("html extraction failed: {0}")]
     Html(String),
 
@@ -86,5 +103,33 @@ mod tests {
         let inner = rusqlite::Error::QueryReturnedNoRows;
         let e: Error = inner.into();
         assert!(matches!(e, Error::Database(_)));
+    }
+
+    #[test]
+    fn pdftotext_missing_message_contains_install_hint() {
+        let e = Error::PdftotextMissing;
+        let s = e.to_string();
+        assert!(s.contains("Poppler"));
+        assert!(s.contains("brew install poppler"));
+        assert!(s.contains("apt install poppler-utils"));
+    }
+
+    #[test]
+    fn pdftotext_timeout_includes_seconds_and_path() {
+        let e = Error::PdftotextTimeout(60, "/tmp/a.pdf".into());
+        let s = e.to_string();
+        assert!(s.contains("60"));
+        assert!(s.contains("/tmp/a.pdf"));
+    }
+
+    #[test]
+    fn pdf_all_engines_failed_includes_both_messages() {
+        let e = Error::PdfAllEnginesFailed {
+            pdf_extract: "unhandled function type 4".into(),
+            pdftotext: "exited 1: bad xref".into(),
+        };
+        let s = e.to_string();
+        assert!(s.contains("unhandled function type 4"));
+        assert!(s.contains("bad xref"));
     }
 }
