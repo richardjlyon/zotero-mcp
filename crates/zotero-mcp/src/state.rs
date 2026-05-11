@@ -36,7 +36,7 @@ impl AppState {
         let user_id = if cfg.zotero.user_id > 0 {
             cfg.zotero.user_id
         } else {
-            detect_user_id(&cfg.zotero.local_api_base).await?
+            detect_user_id(&pool, &cfg.zotero.local_api_base).await?
         };
         let api = LocalApi::new(cfg.zotero.local_api_base.clone(), user_id)?;
         let bbt = BbtClient::new(cfg.zotero.local_api_base.clone())
@@ -67,9 +67,21 @@ impl AppState {
     }
 }
 
-async fn detect_user_id(base: &str) -> anyhow::Result<i64> {
-    // Probe `/api/keys/current`; if Zotero exposes the user ID, use it.
-    // Otherwise return an error directing the user to set zotero.user_id in config.
+async fn detect_user_id(pool: &ReadOnlyPool, base: &str) -> anyhow::Result<i64> {
+    // First try reading the userID directly from Zotero's SQLite — this works
+    // whether Zotero is running or not and doesn't depend on the Local API
+    // exposing a `whoami` endpoint.
+    let from_db = pool
+        .with_conn(|c| c.query_row("SELECT userID FROM users LIMIT 1", [], |r| r.get::<_, i64>(0)))
+        .await
+        .ok();
+    if let Some(id) = from_db {
+        return Ok(id);
+    }
+
+    // Fallback: probe the Local API. Zotero does not document a guaranteed
+    // whoami endpoint, but `/api/keys/current` returns the userID when an
+    // API-key context is present.
     let resp = reqwest::Client::new()
         .get(format!("{}/api/keys/current", base))
         .header("Zotero-API-Version", "3")

@@ -3,11 +3,22 @@ use rusqlite::{Connection, OpenFlags};
 use std::path::Path;
 
 pub fn open_read_only(db: &Path) -> Result<Connection> {
+    // Zotero keeps an open write transaction while running, which makes a plain
+    // SQLITE_OPEN_READ_ONLY connection fail with "database is locked". Open via
+    // URI with `mode=ro&nolock=1&immutable=1` so we get a stable read snapshot
+    // without competing for filesystem locks. Each connection is short-lived
+    // (one query per `with_conn` call), so re-opening picks up Zotero's latest
+    // committed state.
+    let uri = format!(
+        "file:{}?mode=ro&nolock=1&immutable=1",
+        db.to_string_lossy()
+    );
     let conn = Connection::open_with_flags(
-        db,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        &uri,
+        OpenFlags::SQLITE_OPEN_READ_ONLY
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX
+            | OpenFlags::SQLITE_OPEN_URI,
     )?;
-    // We rely on Zotero's WAL mode; do not change journaling.
     conn.busy_timeout(std::time::Duration::from_millis(500))?;
     Ok(conn)
 }
