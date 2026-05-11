@@ -10,9 +10,13 @@ use crate::tools::writes::{self as wr, AddNoteArgs, CollectionArgs, TagArgs, Upd
 use rmcp::{
     Error as McpError, ServerHandler,
     model::{
-        CallToolResult, Content, Implementation, ProtocolVersion, ServerCapabilities, ServerInfo,
+        AnnotateAble, CallToolResult, Content, Implementation,
+        ListResourcesResult, PaginatedRequestParam, ProtocolVersion,
+        RawResource, ReadResourceRequestParam, ReadResourceResult,
+        ResourceContents, ServerCapabilities, ServerInfo,
     },
-    tool,
+    service::RequestContext,
+    tool, RoleServer,
 };
 
 #[derive(Clone)]
@@ -240,5 +244,58 @@ impl ServerHandler for ZoteroServer {
                 "Local Zotero library bridge (read + write via Local API)".into(),
             ),
         }
+    }
+
+    async fn list_resources(
+        &self,
+        _request: PaginatedRequestParam,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListResourcesResult, McpError> {
+        let make = |uri: &str, name: &str, desc: &str| {
+            let mut raw = RawResource::new(uri, name);
+            raw.description = Some(desc.to_string());
+            raw.mime_type = Some("application/json".to_string());
+            raw.no_annotation()
+        };
+        Ok(ListResourcesResult {
+            resources: vec![
+                make(
+                    "zotero://collections",
+                    "Zotero collections",
+                    "All collections in the user's library",
+                ),
+                make(
+                    "zotero://tags",
+                    "Zotero tags",
+                    "All tags in the user's library with counts",
+                ),
+            ],
+            next_cursor: None,
+        })
+    }
+
+    async fn read_resource(
+        &self,
+        request: ReadResourceRequestParam,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ReadResourceResult, McpError> {
+        let body = match request.uri.as_str() {
+            "zotero://collections" => {
+                crate::resources::collections::read_all(&self.state).await
+            }
+            "zotero://tags" => {
+                crate::resources::tags::read_all(&self.state).await
+            }
+            other => {
+                return Err(McpError::invalid_params(
+                    format!("unknown resource uri: {}", other),
+                    None,
+                ))
+            }
+        };
+        let text = body.map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(ReadResourceResult {
+            contents: vec![ResourceContents::text(text, request.uri)],
+        })
     }
 }

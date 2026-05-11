@@ -1,4 +1,5 @@
 mod logging;
+mod resources;
 mod server;
 mod state;
 mod tools;
