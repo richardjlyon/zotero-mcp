@@ -33,7 +33,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::PollSender;
 use tower_http::validate_request::ValidateRequestHeaderLayer;
 
-use crate::oauth;
+use crate::oauth::{self, OAuthState};
 use crate::server::ZoteroServer;
 use crate::state::AppState;
 
@@ -132,6 +132,7 @@ pub async fn run(
     state: AppState,
     addr: SocketAddr,
     bearer: Option<String>,
+    oauth_state: Option<OAuthState>,
 ) -> anyhow::Result<()> {
     let shared = AppShared {
         state,
@@ -142,13 +143,20 @@ pub async fn run(
         .route("/message", post(post_handler))
         .with_state(shared);
 
-    let mut app = Router::new()
-        .merge(resource_routes)
-        .merge(oauth::router())
+    let mut app = Router::new().merge(resource_routes);
+    if let Some(oauth_state) = oauth_state {
+        app = app.merge(oauth::router(oauth_state));
+        tracing::info!("OAuth 2.1 surface mounted (discovery + /oauth/token)");
+    }
+    let mut app = app
         // Task A probe instrumentation: log every request that doesn't match a
         // registered route so we can see what Claude.ai's connector dialog
         // hits before it starts sending OAuth requests. Removed in Task F.
         .fallback(probe_fallback)
+        // Task A probe instrumentation: log every incoming request's full
+        // headers (in particular, whether Claude.ai sends an Authorization
+        // header on /sse and /message today). Removed in Task F.
+        .layer(axum::middleware::from_fn(probe_log_headers))
         .layer(tower_http::trace::TraceLayer::new_for_http());
 
     if let Some(token) = bearer {
@@ -181,4 +189,20 @@ async fn probe_fallback(req: Request) -> StatusCode {
         "probe: unrecognised route hit"
     );
     StatusCode::NOT_FOUND
+}
+
+/// Task A probe instrumentation. Logs every request's full headers so we can
+/// see what Claude.ai sends to /sse and /message today (in particular, whether
+/// it already attaches an Authorization header). Removed in Task F.
+async fn probe_log_headers(
+    req: Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    tracing::info!(
+        method = %req.method(),
+        uri = %req.uri(),
+        headers = ?req.headers(),
+        "probe: request received"
+    );
+    next.run(req).await
 }
