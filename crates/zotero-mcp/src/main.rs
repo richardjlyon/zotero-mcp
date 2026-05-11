@@ -19,12 +19,15 @@ async fn main() -> anyhow::Result<()> {
     let state = state::AppState::build(cfg).await?;
 
     if let Ok(bind) = std::env::var("ZOTERO_MCP_HTTP") {
-        let token = std::env::var("ZOTERO_MCP_BEARER_TOKEN").map_err(|_| {
-            anyhow::anyhow!(
-                "ZOTERO_MCP_HTTP is set but ZOTERO_MCP_BEARER_TOKEN is missing. \
-                 The HTTP transport requires a bearer token."
-            )
-        })?;
+        // Bearer token is now optional. Some MCP clients (notably Claude.ai's
+        // "Add custom connector" flow) probe discovery endpoints without
+        // sending an Authorization header and expect a useful response; a
+        // blanket bearer check breaks that handshake. When the env var is
+        // empty or unset, the HTTP server runs without auth — security then
+        // depends on the transport (e.g., a private Tailscale Funnel URL).
+        let token = std::env::var("ZOTERO_MCP_BEARER_TOKEN")
+            .ok()
+            .filter(|s| !s.is_empty());
         let addr: SocketAddr = bind
             .parse()
             .map_err(|e| anyhow::anyhow!("ZOTERO_MCP_HTTP must be host:port, got {bind:?}: {e}"))?;

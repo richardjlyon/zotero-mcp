@@ -127,23 +127,40 @@ async fn sse_handler(
         .keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(5)))
 }
 
-pub async fn run(state: AppState, addr: SocketAddr, bearer: String) -> anyhow::Result<()> {
+pub async fn run(
+    state: AppState,
+    addr: SocketAddr,
+    bearer: Option<String>,
+) -> anyhow::Result<()> {
     let shared = AppShared {
         state,
         txs: Default::default(),
     };
-    // tower-http marks the simple `bearer` constructor as deprecated in favour
-    // of writing a custom validator, but a constant-time shared-secret check is
-    // exactly what we want here.
-    #[allow(deprecated)]
-    let auth = ValidateRequestHeaderLayer::bearer(&bearer);
-    let app = Router::new()
+    let mut app = Router::new()
         .route("/sse", get(sse_handler))
         .route("/message", post(post_handler))
         .with_state(shared)
-        .layer(auth);
+        // Log every incoming request so we can see what Claude.ai's connector
+        // probes look like.
+        .layer(tower_http::trace::TraceLayer::new_for_http());
+
+    if let Some(token) = bearer {
+        // tower-http marks the simple `bearer` constructor as deprecated in
+        // favour of writing a custom validator, but a constant-time
+        // shared-secret check is exactly what we want here.
+        #[allow(deprecated)]
+        let auth = ValidateRequestHeaderLayer::bearer(&token);
+        app = app.layer(auth);
+        tracing::info!(%addr, "zotero-mcp HTTP/SSE transport listening (bearer auth enabled)");
+    } else {
+        tracing::warn!(
+            %addr,
+            "zotero-mcp HTTP/SSE transport listening WITHOUT auth — \
+             rely on transport-level access control (e.g. Tailscale Funnel privacy)"
+        );
+    }
+
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    tracing::info!(%addr, "zotero-mcp HTTP/SSE transport listening");
     axum::serve(listener, app).await?;
     Ok(())
 }
