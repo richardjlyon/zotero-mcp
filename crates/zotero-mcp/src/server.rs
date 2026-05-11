@@ -1,5 +1,6 @@
 use crate::state::AppState;
 use crate::tools::attachments::{self as att, FirstPagesArgs, ItemKeyArgs as AttachItemKey, RefetchArgs, WebArgs};
+use crate::tools::citations::{self as cit, FormatBibArgs, FormatCitationArgs};
 use crate::tools::search::{self, EmptyArgs, GetItemArgs, ListTagsArgs, RecentArgs, SearchArgs};
 use rmcp::{
     Error as McpError, ServerHandler,
@@ -123,6 +124,22 @@ impl ZoteroServer {
         #[tool(aggr)] args: RefetchArgs,
     ) -> Result<CallToolResult, McpError> {
         att::refetch_url_t(&self.state, args).await
+    }
+
+    #[tool(description = "Format a single Zotero item as a citation (style = CSL name, e.g. 'apa', 'chicago-author-date'; format = 'bib'|'biblatex'|'bibtex'|'ris').")]
+    pub async fn format_citation(
+        &self,
+        #[tool(aggr)] args: FormatCitationArgs,
+    ) -> Result<CallToolResult, McpError> {
+        cit::format_citation_t(&self.state, args).await
+    }
+
+    #[tool(description = "Format multiple Zotero items as a combined bibliography (same style/format options as format_citation).")]
+    pub async fn format_bibliography(
+        &self,
+        #[tool(aggr)] args: FormatBibArgs,
+    ) -> Result<CallToolResult, McpError> {
+        cit::format_bibliography_t(&self.state, args).await
     }
 }
 
