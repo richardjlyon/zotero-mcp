@@ -62,12 +62,12 @@ zotero-mcp  ── read  ──▶ ~/Zotero/zotero.sqlite          (read-only, W
 
 | Concern | Source | Why |
 |---|---|---|
-| Search (metadata + full-text) | SQLite read | Zotero already indexes full-text PDF content in the `fulltextItems` / `fulltextWords` tables; querying directly is dramatically faster than paginating the Web API |
+| Search (metadata + full-text) | SQLite read | Zotero indexes per-word occurrences in `fulltextItemWords` joined to the `fulltextWords` dictionary; querying directly is dramatically faster than paginating the Web API |
 | Item metadata | SQLite read | Cheap join across `items`, `itemData`, `itemDataValues`, `itemCreators`, `creators` |
 | Collections & tags | SQLite read | Native hierarchy in `collections`; tags in `tags` + `itemTags` |
 | Annotations | SQLite read | Zotero stores highlights in `itemAnnotations` |
 | Attachment file resolution | SQLite + filesystem | `itemAttachments` row → `~/Zotero/storage/<key>/<filename>` |
-| PDF extracted text | SQLite (preferred), fallback to live extraction | Zotero's full-text index lives in `fulltextItemWords` keyed by item; if absent, fall back to extracting on the fly |
+| PDF extracted text | Filesystem `.zotero-ft-cache` (preferred), fallback to live extraction | When Zotero has indexed a PDF it writes the extracted text to `~/Zotero/storage/<key>/.zotero-ft-cache`; if that file is absent, fall back to extracting on the fly via `pdf-extract` |
 | Citation formatting | Local Zotero API | `/api/users/93338/items/<key>?format=bib&style=<csl>` |
 | BBT citation key lookup | BetterBibTeX JSON-RPC | `item.citationkey` method |
 | Item writes (metadata, notes, tags) | Local Zotero API | Zotero handles version counters, search-index updates, sync invariants |
