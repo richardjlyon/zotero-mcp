@@ -8,6 +8,7 @@ pub mod pdf;
 pub mod web;
 pub mod bbt;
 pub mod writer;
+pub mod citations;
 
 pub use error::{Error, Result};
 pub use config::Config;
