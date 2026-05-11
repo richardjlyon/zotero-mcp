@@ -102,14 +102,21 @@ Tools (excerpt):
 | `propose_metadata_update` / `apply_metadata_update` / `enrich_item` | Score + apply enrichment |
 | `add_note`, `add_tags`, `remove_tags`, `add_to_collection`, `remove_from_collection` | Library writes |
 | `update_item_fields` | Patch arbitrary fields (version-aware) |
+| `delete_item` | Move item, note, or attachment to trash (recoverable) |
 
 Run `zotero-mcp` in stdio mode + an MCP inspector to see the full list.
 
 ## Configuration
 
-Optional TOML at `~/.config/zotero-mcp/config.toml`. See
-`crates/zotero-mcp/src/core/config.rs` for fields and defaults. The defaults
-work out of the box for a stock Zotero install.
+Optional TOML at the platform config dir:
+
+- macOS: `~/Library/Application Support/dev.zotero-mcp.zotero-mcp/config.toml`
+- Linux: `~/.config/zotero-mcp/config.toml`
+
+See `crates/zotero-mcp/src/core/config.rs` for fields and defaults. The
+defaults work out of the box for a stock Zotero install except for
+`zotero.api_key`, which you must set explicitly if you want writes to work
+(see Install section above).
 
 ## License
 
