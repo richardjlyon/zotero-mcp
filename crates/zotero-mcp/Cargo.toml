@@ -19,4 +19,11 @@ tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 schemars = "0.8"
+axum = "0.8"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["auth"] }
+tokio-util = "0.7"
+tokio-stream = "0.1"
+futures = "0.3"
+rand = "0.9"
 zotero-core = { path = "../zotero-core" }
