@@ -1,6 +1,6 @@
+pub mod attachments;
 pub mod search;
-// Other submodules added in subsequent tasks (35-38):
-// pub mod attachments;
+// Other submodules added in subsequent tasks (36-38):
 // pub mod citations;
 // pub mod writes;
 // pub mod enrichment;

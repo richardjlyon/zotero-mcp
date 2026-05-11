@@ -1,4 +1,5 @@
 use crate::state::AppState;
+use crate::tools::attachments::{self as att, FirstPagesArgs, ItemKeyArgs as AttachItemKey, RefetchArgs, WebArgs};
 use crate::tools::search::{self, EmptyArgs, GetItemArgs, ListTagsArgs, RecentArgs, SearchArgs};
 use rmcp::{
     Error as McpError, ServerHandler,
@@ -66,6 +67,62 @@ impl ZoteroServer {
         #[tool(aggr)] args: RecentArgs,
     ) -> Result<CallToolResult, McpError> {
         search::list_recent_items(&self.state, args).await
+    }
+
+    #[tool(description = "List file attachments and snapshots for an item, with resolved absolute paths.")]
+    pub async fn list_attachments(
+        &self,
+        #[tool(aggr)] args: AttachItemKey,
+    ) -> Result<CallToolResult, McpError> {
+        att::list_attachments_t(&self.state, args).await
+    }
+
+    #[tool(description = "Get the absolute filesystem path to a Zotero attachment.")]
+    pub async fn get_pdf_path(
+        &self,
+        #[tool(aggr)] args: AttachItemKey,
+    ) -> Result<CallToolResult, McpError> {
+        att::get_pdf_path(&self.state, args).await
+    }
+
+    #[tool(description = "Read full extracted PDF text for an item (uses Zotero's .zotero-ft-cache when present).")]
+    pub async fn get_pdf_text(
+        &self,
+        #[tool(aggr)] args: AttachItemKey,
+    ) -> Result<CallToolResult, McpError> {
+        att::get_pdf_text_t(&self.state, args).await
+    }
+
+    #[tool(description = "Read the first N pages of a PDF (default 2). Useful for cheap context grabs.")]
+    pub async fn get_pdf_first_pages(
+        &self,
+        #[tool(aggr)] args: FirstPagesArgs,
+    ) -> Result<CallToolResult, McpError> {
+        att::get_pdf_first_pages_t(&self.state, args).await
+    }
+
+    #[tool(description = "List PDF annotations (highlights, comments) for an item.")]
+    pub async fn list_annotations(
+        &self,
+        #[tool(aggr)] args: AttachItemKey,
+    ) -> Result<CallToolResult, McpError> {
+        att::list_annotations_t(&self.state, args).await
+    }
+
+    #[tool(description = "Read webpage content for an item via stored snapshot or live fetch (mode = snapshot|live|auto).")]
+    pub async fn get_webpage_content(
+        &self,
+        #[tool(aggr)] args: WebArgs,
+    ) -> Result<CallToolResult, McpError> {
+        att::get_webpage_content_t(&self.state, args).await
+    }
+
+    #[tool(description = "Re-fetch a webpage item live, optionally saving a fresh HTML snapshot as an attachment.")]
+    pub async fn refetch_url(
+        &self,
+        #[tool(aggr)] args: RefetchArgs,
+    ) -> Result<CallToolResult, McpError> {
+        att::refetch_url_t(&self.state, args).await
     }
 }
 
