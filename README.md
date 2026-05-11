@@ -22,6 +22,19 @@ You also need:
   *Preferences → Advanced → Allow other applications to communicate with Zotero* enabled.
 - **BetterBibTeX** (optional; without it, `citation_key` fields are `null` but
   everything else works).
+- A **Zotero Web API key** if you want to write to the library (add notes,
+  tags, metadata patches, …). Generate one at
+  <https://www.zotero.org/settings/keys> with the *library:write* permission,
+  then add it to `config.toml`:
+
+  ```toml
+  [zotero]
+  api_key = "<paste the key>"
+  ```
+
+  Reads do not need a key — Zotero's local server serves them with no auth.
+  Writes have to go through `api.zotero.org` because the local server
+  returns 501 on `PATCH`/`POST`.
 
 ## Use it
 
