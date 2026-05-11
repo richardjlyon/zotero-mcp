@@ -16,6 +16,11 @@
     <dict>
         <key>ZOTERO_MCP_HTTP</key>
         <string>127.0.0.1:8765</string>
+        <!-- Replace with your Tailscale Funnel hostname. Must match the
+             public URL clients reach exactly: scheme + host, no trailing
+             slash. OAuth discovery embeds this verbatim. -->
+        <key>ZOTERO_MCP_OAUTH_ISSUER</key>
+        <string>https://laptop.stoat-minnow.ts.net</string>
         <key>RUST_LOG</key>
         <string>info,tower_http=debug</string>
     </dict>

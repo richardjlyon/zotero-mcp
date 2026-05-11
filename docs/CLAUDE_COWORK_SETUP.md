@@ -15,7 +15,9 @@ Cowork sandbox  →  https://<your-host>.<tailnet>.ts.net/sse  (HTTPS, Tailscale
 
 The Mac runs `zotero-mcp` in HTTP mode under `launchd`. Tailscale Funnel
 publishes that local port to the public internet with a stable URL.
-A bearer token in front of the HTTP server gates access.
+**OAuth 2.1 (authorization_code + PKCE)** gates the resource endpoints
+so anyone hitting the public URL without a valid bearer token gets a
+401 and the Claude.ai connector flow is the only way in.
 
 ## Prerequisites
 
@@ -28,26 +30,33 @@ A bearer token in front of the HTTP server gates access.
 
 ## One-time setup
 
-1. **Generate a bearer token** and store it in `~/.config/zotero-mcp/token`:
+1. **Install the launchd plist** for the HTTP server (the file is
+   checked into this repo at `docs/launchd/com.zotero-mcp.http.plist`;
+   copy or recreate it under `~/Library/LaunchAgents/`). It sets:
+
+   - `ZOTERO_MCP_HTTP=127.0.0.1:8765`
+   - `ZOTERO_MCP_OAUTH_ISSUER=https://laptop.<tailnet>.ts.net` —
+     **must match the public Tailscale Funnel hostname exactly**, with
+     `https://` and no trailing slash. OAuth clients validate this in
+     discovery, so a mismatch breaks the handshake.
 
    ```bash
-   mkdir -p ~/.config/zotero-mcp ~/Library/Logs/zotero-mcp
-   python3 -c "import secrets,sys; sys.stdout.write(secrets.token_hex(32))" \
-     > ~/.config/zotero-mcp/token
-   chmod 600 ~/.config/zotero-mcp/token
+   mkdir -p ~/Library/Logs/zotero-mcp
+   launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.zotero-mcp.http.plist
    ```
 
-2. **Install the launchd plist** for the HTTP server (the file is checked
-   into this repo at `docs/launchd/com.zotero-mcp.http.plist`; copy or
-   recreate it under `~/Library/LaunchAgents/`). It sets
-   `ZOTERO_MCP_HTTP=127.0.0.1:8765` and sources the bearer token from
-   the file above.
+   On first start the server generates a pre-shared OAuth client
+   credential pair at
+   `~/Library/Application Support/dev.zotero-mcp.zotero-mcp/oauth.toml`
+   (mode `0600`) and prints it to stderr. The TOML looks like:
 
-   ```bash
-   launchctl load ~/Library/LaunchAgents/com.zotero-mcp.http.plist
+   ```toml
+   client_id = "zotero-mcp-<8-hex>"
+   client_secret = "<32-hex>"
+   issuer = "https://laptop.<tailnet>.ts.net"
    ```
 
-3. **Enable Tailscale Funnel** for port 8765:
+2. **Enable Tailscale Funnel** for port 8765:
 
    ```bash
    tailscale funnel --bg 8765
@@ -57,47 +66,106 @@ A bearer token in front of the HTTP server gates access.
    Funnel state persists across reboots; `tailscaled` re-establishes
    it automatically.
 
-4. **Verify** end to end:
+3. **Verify** discovery + 401 challenge:
 
    ```bash
    URL="https://laptop.<tailnet>.ts.net"
-   TOKEN=$(cat ~/.config/zotero-mcp/token)
-   curl -sN -H "Authorization: Bearer $TOKEN" -m 5 "$URL/sse" | head -3
+   curl -sS "$URL/.well-known/oauth-authorization-server" | jq .
+   curl -sSi -m 5 "$URL/sse" | head -3
    ```
 
-   You should see an SSE comment line followed by:
-
-   ```
-   event: endpoint
-   data: /message?sessionId=<hex>
-   ```
+   The discovery doc should advertise `authorization_endpoint`,
+   `token_endpoint`, and `code_challenge_methods_supported=["S256"]`.
+   `/sse` should return `401 Unauthorized` with a
+   `WWW-Authenticate: Bearer …, resource_metadata="…"` header.
 
 ## Add the connector in Claude.ai
 
 In Claude.ai → Settings → Connectors → "Add custom connector":
 
 - **Remote MCP server URL**: `https://laptop.<tailnet>.ts.net/sse`
-- **Authentication**: Bearer token. Paste the contents of
-  `~/.config/zotero-mcp/token`.
+- **Advanced → OAuth Client ID**: paste `client_id` from `oauth.toml`
+- **Advanced → OAuth Client Secret**: paste `client_secret` from `oauth.toml`
 
-Restart Claude (Desktop and any open Cowork sessions). The Zotero tools
-should now appear in Cowork's tool list.
+Claude.ai handles the rest:
+
+1. It hits `/sse`, sees `401` + `WWW-Authenticate: Bearer
+   resource_metadata="…"`.
+2. It fetches `/.well-known/oauth-protected-resource` and
+   `/.well-known/oauth-authorization-server` to discover the endpoints.
+3. It opens your browser to `/authorize?…&code_challenge=…&
+   code_challenge_method=S256&…`.
+4. We redirect to `https://claude.ai/api/mcp/auth_callback?code=…&state=…`.
+5. Claude.ai posts to `/oauth/token` with the code + `code_verifier`.
+   We verify `SHA256(verifier) == stored code_challenge` and mint a
+   1-hour Bearer access token.
+6. Claude.ai retries `/sse` with `Authorization: Bearer …` and the
+   Zotero tools start working.
+
+Restart Cowork sessions after first connect; the Zotero tools appear
+in Cowork's tool list.
+
+## Operational notes
+
+### Token lifecycle
+
+Access tokens live in memory only — they have a 1-hour TTL and a
+server restart invalidates every outstanding one. Claude.ai detects
+the 401 on the next request and silently re-runs the OAuth flow.
+This is also the recommended way to **revoke all sessions**: restart
+the launchd job.
+
+```bash
+launchctl kickstart -k gui/$(id -u)/com.zotero-mcp.http
+```
+
+### Rotating the OAuth client credentials
+
+To re-issue `client_id`/`client_secret` (e.g. you suspect leak):
+
+```bash
+rm "$HOME/Library/Application Support/dev.zotero-mcp.zotero-mcp/oauth.toml"
+launchctl kickstart -k gui/$(id -u)/com.zotero-mcp.http
+cat "$HOME/Library/Application Support/dev.zotero-mcp.zotero-mcp/oauth.toml"
+```
+
+Then paste the new `client_id` / `client_secret` into the Claude.ai
+connector dialog (Advanced section, same place as initial setup).
+
+### Listening without OAuth (development only)
+
+If `ZOTERO_MCP_OAUTH_ISSUER` is unset and no `oauth.toml` exists, the
+server runs without an auth gate. **Do not expose that mode through
+Funnel** — the public URL becomes an open Zotero proxy.
 
 ## Security notes
 
-- The bearer token is the only access control. Treat it like a password.
-- Funnel exposes the URL publicly; anyone with the URL **and** the token
-  can read your library.
-- The HTTP server binds to `127.0.0.1` only, so direct LAN access is not
-  possible — clients must go through Tailscale Funnel.
+- The OAuth client_secret is the only thing protecting the public URL.
+  Treat it like a password and rotate after any leak.
+- Funnel exposes the URL publicly; anyone with the URL **and** the
+  credentials can read your library.
+- The HTTP server binds to `127.0.0.1` only, so direct LAN access is
+  not possible — clients must go through Tailscale Funnel.
+- `oauth.toml` is written with mode `0600`. Keep it that way.
+- `/authorize` only redirects to URIs under `https://claude.ai/api/mcp/`
+  or `https://claude.com/api/mcp/` — other redirect targets are rejected
+  before any code is issued.
 
 ## Troubleshooting
 
-- **401 Unauthorized**: token mismatch. Re-paste from
-  `~/.config/zotero-mcp/token`.
+- **401 Unauthorized on /sse with no `Authorization` header**: expected
+  — that's the OAuth challenge. Claude.ai should follow up by hitting
+  `/.well-known/oauth-protected-resource`. If it doesn't, check the
+  connector's Server URL field includes `/sse`.
+- **Claude.ai shows "Server unreachable" / cached failure**: edit the
+  connector and Save (no changes needed) to invalidate cached state and
+  force a fresh OAuth handshake.
 - **Connection hangs with no events**: check
   `~/Library/Logs/zotero-mcp/http.err.log`. The "SSE buffer flush"
   padding handles most HTTP/2 proxy layers, but if you see no events
   *at all* the upstream Zotero SQLite open may have failed at startup.
 - **Funnel says "Funnel is not enabled on your tailnet"**: visit
   `https://login.tailscale.com/admin/settings/features` and toggle it on.
+- **`invalid_grant` in logs after `/oauth/token`**: PKCE mismatch or
+  expired/already-used code. Usually self-corrects on the next attempt;
+  if it persists, rotate the OAuth credentials (above).

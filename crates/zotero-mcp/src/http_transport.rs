@@ -159,16 +159,7 @@ pub async fn run(
         app = app.merge(oauth::router(oauth_state));
         tracing::info!("OAuth 2.1 surface mounted (discovery + /oauth/token + bearer gate on /sse, /message)");
     }
-    let mut app = app
-        // Task A probe instrumentation: log every request that doesn't match a
-        // registered route so we can see what Claude.ai's connector dialog
-        // hits before it starts sending OAuth requests. Removed in Task F.
-        .fallback(probe_fallback)
-        // Task A probe instrumentation: log every incoming request's full
-        // headers (in particular, whether Claude.ai sends an Authorization
-        // header on /sse and /message today). Removed in Task F.
-        .layer(axum::middleware::from_fn(probe_log_headers))
-        .layer(tower_http::trace::TraceLayer::new_for_http());
+    let mut app = app.layer(tower_http::trace::TraceLayer::new_for_http());
 
     if let Some(token) = bearer {
         // Legacy shared-secret bearer auth, preserved for environments that
@@ -234,33 +225,6 @@ async fn require_bearer_token(
         )],
     )
         .into_response()
-}
-
-/// Task A probe instrumentation. Removed in Task F.
-async fn probe_fallback(req: Request) -> StatusCode {
-    tracing::info!(
-        method = %req.method(),
-        uri = %req.uri(),
-        headers = ?req.headers(),
-        "probe: unrecognised route hit"
-    );
-    StatusCode::NOT_FOUND
-}
-
-/// Task A probe instrumentation. Logs every request's full headers so we can
-/// see what Claude.ai sends to /sse and /message today (in particular, whether
-/// it already attaches an Authorization header). Removed in Task F.
-async fn probe_log_headers(
-    req: Request,
-    next: axum::middleware::Next,
-) -> axum::response::Response {
-    tracing::info!(
-        method = %req.method(),
-        uri = %req.uri(),
-        headers = ?req.headers(),
-        "probe: request received"
-    );
-    next.run(req).await
 }
 
 #[cfg(test)]
