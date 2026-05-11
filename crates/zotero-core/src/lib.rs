@@ -10,6 +10,7 @@ pub mod bbt;
 pub mod writer;
 pub mod citations;
 pub mod cache;
+pub mod enrichment;
 
 pub use error::{Error, Result};
 pub use config::Config;
