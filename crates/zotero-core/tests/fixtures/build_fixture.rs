@@ -145,6 +145,10 @@ fn insert_minimal_data(c: &Connection) {
     c.execute("INSERT INTO fulltextWords VALUES (1, 'zoteroconnectortest'), (2, 'keyword'), (3, 'paper')", []).unwrap();
     c.execute("INSERT INTO fulltextItems VALUES (3, 1, 1, 50, 50, 1, 0)", []).unwrap();
     c.execute("INSERT INTO fulltextItemWords VALUES (1, 3), (2, 3), (3, 3)", []).unwrap();
+
+    // Annotation on the PDF attachment (parentItemID = 3, attachment for item 2)
+    c.execute("INSERT INTO items VALUES (6, 37, '2026-05-04 00:00:00', '2026-05-04 00:00:00', '2026-05-04 00:00:00', 1, 'ANNO0001', 1, 0)", []).unwrap();
+    c.execute("INSERT INTO itemAnnotations VALUES (6, 3, 1, 'rjl', 'A highlighted passage.', 'My note on it.', '#ffff00', '12', '00012|00000', '{}', 0)", []).unwrap();
 }
 
 #[allow(dead_code)]
