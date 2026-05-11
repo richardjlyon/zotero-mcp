@@ -1,6 +1,7 @@
 mod logging;
 mod server;
 mod state;
+mod tools;
 
 use rmcp::ServiceExt;
 
