@@ -5,7 +5,7 @@ use rmcp::model::{CallToolResult, Content};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use crate::core::reader::items::get_item_by_key;
-use crate::core::writer::items::update_item_fields;
+use crate::core::writer::items::{delete_item, update_item_fields};
 use crate::core::writer::notes::add_note;
 use crate::core::writer::tags::{add_tags, add_to_collection, remove_from_collection, remove_tags};
 
@@ -66,4 +66,15 @@ pub async fn add_to_collection_t(s: &AppState, a: CollectionArgs) -> Result<Call
 pub async fn remove_from_collection_t(s: &AppState, a: CollectionArgs) -> Result<CallToolResult, Error> {
     remove_from_collection(&s.api, &a.item_key, &a.collection_key).await.map_err(map_err)?;
     Ok(CallToolResult::success(vec![Content::text("ok")]))
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct DeleteItemArgs {
+    pub item_key: String,
+}
+
+pub async fn delete_item_t(s: &AppState, a: DeleteItemArgs) -> Result<CallToolResult, Error> {
+    let item = get_item_by_key(&s.pool, &a.item_key, 1).await.map_err(map_err)?;
+    delete_item(&s.api, &a.item_key, item.version).await.map_err(map_err)?;
+    Ok(CallToolResult::success(vec![Content::text("ok (moved to trash)")]))
 }

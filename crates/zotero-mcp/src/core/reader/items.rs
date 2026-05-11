@@ -41,7 +41,12 @@ pub async fn get_item_by_key(pool: &ReadOnlyPool, key: &str, library_id: i64) ->
             while let Some(r) = rows.next()? {
                 let name: String = r.get(0)?;
                 let value: String = r.get(1)?;
-                fields.insert(name, Value::String(value));
+                let normalized = if name == "date" {
+                    strip_zotero_date_prefix(&value)
+                } else {
+                    value
+                };
+                fields.insert(name, Value::String(normalized));
             }
 
             // Creators
@@ -140,5 +145,77 @@ pub async fn hydrate_citation_key(item: &mut Item, bbt: Option<&BbtClient>) {
         if let Some(ck) = map.get(&item.key) {
             item.citation_key = Some(ck.clone());
         }
+    }
+}
+
+/// Zotero stores date-typed fields in its local DB as
+/// `"<YYYY-MM-DD> <user-entered-text>"` — the leading 10 characters are an
+/// internal sortable form (which may be `0000-00-00` when no parseable date
+/// is available), then a space, then the original text. Clients (and the
+/// Web API) strip the prefix before showing it to users. We do the same on
+/// read so callers get the clean user-text and our output matches what the
+/// Web API returns.
+///
+/// Non-date fields don't follow this format, so we only strip when the value
+/// looks unambiguously like a Zotero date prefix.
+fn strip_zotero_date_prefix(value: &str) -> String {
+    let bytes = value.as_bytes();
+    if bytes.len() < 11 || bytes[10] != b' ' {
+        return value.to_string();
+    }
+    let is_digit = |i: usize| bytes[i].is_ascii_digit();
+    let dashes_match =
+        bytes[4] == b'-' && bytes[7] == b'-' &&
+        is_digit(0) && is_digit(1) && is_digit(2) && is_digit(3) &&
+        is_digit(5) && is_digit(6) && is_digit(8) && is_digit(9);
+    if !dashes_match {
+        return value.to_string();
+    }
+    value[11..].to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::strip_zotero_date_prefix;
+
+    #[test]
+    fn strips_sortable_prefix_from_date_with_user_text() {
+        assert_eq!(
+            strip_zotero_date_prefix("2013-03-08 March 8, 2013"),
+            "March 8, 2013"
+        );
+    }
+
+    #[test]
+    fn strips_sortable_prefix_when_user_text_equals_iso() {
+        // What we observed in the wild: user pasted "2013-03-08" and Zotero
+        // stored sortable+user-text as "2013-03-08 2013-03-08".
+        assert_eq!(
+            strip_zotero_date_prefix("2013-03-08 2013-03-08"),
+            "2013-03-08"
+        );
+    }
+
+    #[test]
+    fn strips_zero_sortable_for_unparseable_dates() {
+        assert_eq!(
+            strip_zotero_date_prefix("0000-00-00 circa 1850"),
+            "circa 1850"
+        );
+    }
+
+    #[test]
+    fn leaves_non_date_values_alone() {
+        assert_eq!(strip_zotero_date_prefix("On Bullshit"), "On Bullshit");
+        assert_eq!(strip_zotero_date_prefix(""), "");
+        assert_eq!(strip_zotero_date_prefix("10.1126/science.1228026"), "10.1126/science.1228026");
+        // Same length as prefix (11) but not the right shape:
+        assert_eq!(strip_zotero_date_prefix("foo bar baz"), "foo bar baz");
+    }
+
+    #[test]
+    fn leaves_strings_shorter_than_prefix_alone() {
+        assert_eq!(strip_zotero_date_prefix("2013"), "2013");
+        assert_eq!(strip_zotero_date_prefix("2013-03-08"), "2013-03-08");
     }
 }

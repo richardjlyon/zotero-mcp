@@ -6,7 +6,9 @@ use crate::tools::enrichment::{
     SearchSourceArgs, WeakArgs,
 };
 use crate::tools::search::{self, EmptyArgs, GetItemArgs, ListTagsArgs, RecentArgs, SearchArgs};
-use crate::tools::writes::{self as wr, AddNoteArgs, CollectionArgs, TagArgs, UpdateFieldsArgs};
+use crate::tools::writes::{
+    self as wr, AddNoteArgs, CollectionArgs, DeleteItemArgs, TagArgs, UpdateFieldsArgs,
+};
 use rmcp::{
     Error as McpError, ServerHandler,
     model::{
@@ -179,6 +181,15 @@ impl ZoteroServer {
     #[tool(description = "Remove an item from a collection (by collection key).")]
     pub async fn remove_from_collection(&self, #[tool(aggr)] args: CollectionArgs) -> Result<CallToolResult, McpError> {
         wr::remove_from_collection_t(&self.state, args).await
+    }
+
+    #[tool(
+        description = "Move an item (regular item, note, or attachment) to Zotero's trash. \
+                       Recoverable: items remain in the library until the trash is emptied. \
+                       Use this when the user explicitly asks to delete something."
+    )]
+    pub async fn delete_item(&self, #[tool(aggr)] args: DeleteItemArgs) -> Result<CallToolResult, McpError> {
+        wr::delete_item_t(&self.state, args).await
     }
 
     #[tool(description = "Find items with weak metadata (missing DOI/abstract, stub titles).")]

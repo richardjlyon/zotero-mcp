@@ -15,6 +15,23 @@ pub async fn update_item_fields(
         .json(&fields)
         .send()
         .await?;
+    handle_write_response(item_key, resp).await
+}
+
+/// Move an item (or note attachment) to Zotero's trash via DELETE.
+/// Recoverable — trashed items remain in the user's library and can be
+/// restored from the Trash collection in Zotero's UI until they're
+/// permanently emptied.
+pub async fn delete_item(api: &LocalApi, item_key: &str, version: i64) -> Result<()> {
+    let resp = api
+        .write_request(Method::DELETE, &format!("/items/{item_key}"))?
+        .header("If-Unmodified-Since-Version", version.to_string())
+        .send()
+        .await?;
+    handle_write_response(item_key, resp).await
+}
+
+async fn handle_write_response(item_key: &str, resp: reqwest::Response) -> Result<()> {
     let status = resp.status();
     if status.is_success() {
         return Ok(());
