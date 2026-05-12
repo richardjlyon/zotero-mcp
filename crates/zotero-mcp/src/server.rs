@@ -200,6 +200,14 @@ impl ZoteroServer {
         att::create_item_t(&self.state, args).await
     }
 
+    #[tool(description = "Attach a URL as a child of a Zotero item (linkMode: linked_url). No bytes transfer; Zotero stores just the URL. Use this for online resources you want listed alongside an item without downloading them. Input: { parent_key, url, title? }. Returns { attachment_key }.")]
+    pub async fn attach_link(
+        &self,
+        #[tool(aggr)] args: att::AttachLinkArgs,
+    ) -> Result<CallToolResult, McpError> {
+        att::attach_link_t(&self.state, args).await
+    }
+
     #[tool(description = "Find items with weak metadata (missing DOI/abstract, stub titles).")]
     pub async fn find_weak_metadata_items(&self, #[tool(aggr)] args: WeakArgs) -> Result<CallToolResult, McpError> {
         en::find_weak_metadata_items_t(&self.state, args).await

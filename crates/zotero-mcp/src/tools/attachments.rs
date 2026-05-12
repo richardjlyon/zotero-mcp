@@ -8,6 +8,7 @@ use crate::core::pdf::{get_pdf_first_pages, get_pdf_text};
 use crate::core::reader::annotations::list_annotations;
 use crate::core::reader::attachments::{list_attachments, resolve_path};
 use crate::core::web::{get_webpage_content, refetch_url, WebMode};
+use crate::core::writer::attachments::attach_link;
 use crate::core::writer::items::create_item;
 use serde_json::Value;
 
@@ -143,5 +144,22 @@ pub async fn create_item_t(s: &AppState, a: CreateItemArgs) -> Result<CallToolRe
     Ok(CallToolResult::success(vec![Content::json(serde_json::json!({
         "item_key": key,
         "version": version,
+    }))?]))
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct AttachLinkArgs {
+    pub parent_key: String,
+    pub url: String,
+    #[serde(default)]
+    pub title: Option<String>,
+}
+
+pub async fn attach_link_t(s: &AppState, a: AttachLinkArgs) -> Result<CallToolResult, Error> {
+    let key = attach_link(&s.api, &a.parent_key, &a.url, a.title.as_deref())
+        .await
+        .map_err(map_err)?;
+    Ok(CallToolResult::success(vec![Content::json(serde_json::json!({
+        "attachment_key": key,
     }))?]))
 }
