@@ -103,15 +103,20 @@ async fn live_create_item_attach_file_attach_link_roundtrip() {
     }
 
     // Step 5: Teardown — delete the parent. Children auto-trash with it.
+    // Zotero requires an `If-Unmodified-Since-Version` header on DELETE
+    // (otherwise 428 Precondition Required). The parent's version has been
+    // bumped by child creation, so use a sentinel that always passes — this
+    // is teardown for a known-disposable item, not real concurrency control.
     use reqwest::Method;
     let resp = api
         .write_request(Method::DELETE, &format!("/items/{parent_key}"))
         .unwrap()
+        .header("If-Unmodified-Since-Version", "99999999")
         .send()
         .await
         .unwrap();
     assert!(
-        resp.status().is_success() || resp.status() == 412 || resp.status() == 404,
+        resp.status().is_success() || resp.status() == 404,
         "delete failed: {}",
         resp.status()
     );
@@ -204,11 +209,19 @@ async fn live_attach_file_linked_file_roundtrip() {
     );
     println!("path roundtrip ok: {path_val}");
 
-    // Teardown.
+    // Teardown. See the create_item_attach_file test for why we use a sentinel
+    // If-Unmodified-Since-Version on DELETE.
     use reqwest::Method;
-    api.write_request(Method::DELETE, &format!("/items/{parent_key}"))
+    let del = api
+        .write_request(Method::DELETE, &format!("/items/{parent_key}"))
         .unwrap()
+        .header("If-Unmodified-Since-Version", "99999999")
         .send()
         .await
         .unwrap();
+    assert!(
+        del.status().is_success() || del.status() == 404,
+        "linked-file teardown delete failed: {}",
+        del.status()
+    );
 }

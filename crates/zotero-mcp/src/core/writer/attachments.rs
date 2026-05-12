@@ -249,9 +249,12 @@ async fn attach_file_imported(
     let mtime = unix_ms_now();
     let filesize = bytes.len();
 
-    // Step 5.1a: create the attachment row.
+    // Step 5.1a: create the attachment row. md5/mtime are server-managed
+    // for imported_file mode — they get set during the upload protocol.
+    // Sending them here would make Zotero treat the row as already-linked,
+    // and the subsequent authorize step would 412 with `file exists`.
     let attach_key = create_imported_attachment_row(
-        api, parent_key, filename, content_type, &md5, mtime,
+        api, parent_key, filename, content_type,
     )
     .await?;
 
@@ -278,8 +281,6 @@ async fn create_imported_attachment_row(
     parent_key: &str,
     filename: &str,
     content_type: &str,
-    md5: &str,
-    mtime: u64,
 ) -> Result<String> {
     let body = json!([{
         "itemType": "attachment",
@@ -289,8 +290,6 @@ async fn create_imported_attachment_row(
         "filename": filename,
         "contentType": content_type,
         "charset": "",
-        "md5": md5,
-        "mtime": mtime,
         "tags": [],
         "relations": {}
     }]);
@@ -421,9 +420,13 @@ async fn put_to_s3(
     body.extend_from_slice(bytes);
     body.extend_from_slice(suffix.as_bytes());
 
+    // Per Zotero's documented protocol: POST (not PUT) the prefix+bytes+suffix
+    // body to the storage URL. The authorize step's returned `contentType` is
+    // `multipart/form-data; boundary=...` — the prefix/suffix already contain
+    // the form-data framing.
     let resp = api
         .http
-        .put(url)
+        .post(url)
         .header("Content-Type", content_type)
         .body(body)
         .send()
@@ -444,12 +447,14 @@ async fn put_to_s3(
 }
 
 async fn register_upload(api: &LocalApi, attach_key: &str, upload_key: &str) -> Result<()> {
+    // Per Zotero protocol: uploadKey goes in the form-encoded body, NOT the
+    // URL query. Sending it as `?upload=...` yields 400 "POST data not provided".
+    let body = format!("upload={}", urlencoding::encode(upload_key));
     let resp = api
-        .write_request(
-            Method::POST,
-            &format!("/items/{attach_key}/file?upload={upload_key}"),
-        )?
+        .write_request(Method::POST, &format!("/items/{attach_key}/file"))?
+        .header("Content-Type", "application/x-www-form-urlencoded")
         .header("If-None-Match", "*")
+        .body(body)
         .send()
         .await
         .map_err(|e| Error::UploadFailed {

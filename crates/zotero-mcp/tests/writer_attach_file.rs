@@ -1,6 +1,6 @@
 use serde_json::json;
 use std::path::PathBuf;
-use wiremock::matchers::{body_partial_json, body_string_contains, header, method, path, query_param};
+use wiremock::matchers::{body_partial_json, body_string_contains, header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 use zotero_mcp::core::error::Error;
 use zotero_mcp::core::writer::attachments::{attach_file, AttachFileOptions, AttachmentMode};
@@ -190,7 +190,9 @@ async fn imported_file_md5_exists_short_circuits_upload() {
 
     let server = MockServer::start().await;
 
-    // Step 5.1a: create attachment item.
+    // Step 5.1a: create attachment item. md5/mtime are server-managed for
+    // imported_file mode — they MUST NOT be in this body; sending them makes
+    // Zotero treat the row as already-linked and the authorize step 412s.
     Mock::given(method("POST"))
         .and(path("/users/93338/items"))
         .and(body_partial_json(json!([{
@@ -198,8 +200,7 @@ async fn imported_file_md5_exists_short_circuits_upload() {
             "parentItem": "PARENT01",
             "linkMode": "imported_file",
             "filename": "hello.pdf",
-            "contentType": "application/pdf",
-            "md5": md5
+            "contentType": "application/pdf"
         }])))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "successful": { "0": { "key": "ATT00001", "version": 1 } }
@@ -263,21 +264,22 @@ async fn imported_file_full_three_step_upload_succeeds() {
         .mount(&server)
         .await;
 
-    // Step 5.1c.PUT: receives prefix + file_bytes + suffix.
+    // Step 5.1c.upload: POST prefix + file_bytes + suffix (multipart/form-data
+    // framing supplied by the authorize step).
     let mut expected_body = b"PFX".to_vec();
     expected_body.extend_from_slice(HELLO_PDF);
     expected_body.extend_from_slice(b"SFX");
-    Mock::given(method("PUT"))
+    Mock::given(method("POST"))
         .and(path("/upload"))
         .and(header("Content-Type", "application/octet-stream"))
         .respond_with(ResponseTemplate::new(200))
         .mount(&s3)
         .await;
 
-    // Step 5.1c.register: POST with ?upload=<key>.
+    // Step 5.1c.register: POST with form body `upload=<key>` (NOT a query param).
     Mock::given(method("POST"))
         .and(path("/users/93338/items/ATT00002/file"))
-        .and(query_param("upload", "UPLOADKEY"))
+        .and(body_string_contains("upload=UPLOADKEY"))
         .respond_with(ResponseTemplate::new(204))
         .mount(&server)
         .await;
@@ -321,7 +323,7 @@ async fn imported_file_s3_put_failure_maps_to_upload_failed_stage_s3_put() {
         })))
         .mount(&server)
         .await;
-    Mock::given(method("PUT"))
+    Mock::given(method("POST"))
         .and(path("/upload"))
         .respond_with(ResponseTemplate::new(500).set_body_string("S3 boom"))
         .mount(&s3)
