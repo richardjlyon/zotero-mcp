@@ -192,6 +192,14 @@ impl ZoteroServer {
         wr::delete_item_t(&self.state, args).await
     }
 
+    #[tool(description = "Create a new Zotero item. Input: { item: <Zotero-shaped JSON object with required itemType field>, collection_keys?: [string] }. Returns { item_key, version }. Tags are an array of objects: [{\"tag\": \"x\"}]. Creators use Zotero's creatorType vocabulary (author/editor/translator/etc). For metadata-discovery flows, lookup_doi / search_crossref return the JSON shape directly compatible with this tool.")]
+    pub async fn create_item(
+        &self,
+        #[tool(aggr)] args: att::CreateItemArgs,
+    ) -> Result<CallToolResult, McpError> {
+        att::create_item_t(&self.state, args).await
+    }
+
     #[tool(description = "Find items with weak metadata (missing DOI/abstract, stub titles).")]
     pub async fn find_weak_metadata_items(&self, #[tool(aggr)] args: WeakArgs) -> Result<CallToolResult, McpError> {
         en::find_weak_metadata_items_t(&self.state, args).await

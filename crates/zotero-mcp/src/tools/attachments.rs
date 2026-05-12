@@ -8,6 +8,8 @@ use crate::core::pdf::{get_pdf_first_pages, get_pdf_text};
 use crate::core::reader::annotations::list_annotations;
 use crate::core::reader::attachments::{list_attachments, resolve_path};
 use crate::core::web::{get_webpage_content, refetch_url, WebMode};
+use crate::core::writer::items::create_item;
+use serde_json::Value;
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 pub struct ItemKeyArgs {
@@ -121,4 +123,25 @@ pub async fn refetch_url_t(s: &AppState, a: RefetchArgs) -> Result<CallToolResul
     Ok(CallToolResult::success(vec![Content::json(
         serde_json::to_value(&r).unwrap(),
     )?]))
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct CreateItemArgs {
+    /// Zotero-shaped item JSON. Required: itemType (string). Everything else
+    /// pass-through to the Zotero Web API.
+    pub item: Value,
+    /// Optional collection keys to file the new item under. Equivalent to
+    /// setting `collections` inside `item`; the two are unioned.
+    #[serde(default)]
+    pub collection_keys: Vec<String>,
+}
+
+pub async fn create_item_t(s: &AppState, a: CreateItemArgs) -> Result<CallToolResult, Error> {
+    let (key, version) = create_item(&s.api, &a.item, &a.collection_keys)
+        .await
+        .map_err(map_err)?;
+    Ok(CallToolResult::success(vec![Content::json(serde_json::json!({
+        "item_key": key,
+        "version": version,
+    }))?]))
 }
