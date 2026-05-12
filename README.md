@@ -121,6 +121,9 @@ Tools (excerpt):
 | `propose_metadata_update` / `apply_metadata_update` / `enrich_item` | Score + apply enrichment |
 | `add_note`, `add_tags`, `remove_tags`, `add_to_collection`, `remove_from_collection` | Library writes |
 | `update_item_fields` | Patch arbitrary fields (version-aware) |
+| `create_item` | Create a new Zotero item from a metadata JSON object |
+| `attach_file` | Attach a local file to a parent item (`imported_file` or `linked_file` mode) |
+| `attach_link` | Attach a URL to a parent item as a `linked_url` attachment |
 | `delete_item` | Move item, note, or attachment to trash (recoverable) |
 
 Run `zotero-mcp` in stdio mode + an MCP inspector to see the full list.
@@ -136,6 +139,61 @@ See `crates/zotero-mcp/src/core/config.rs` for fields and defaults. The
 defaults work out of the box for a stock Zotero install except for
 `zotero.api_key`, which you must set explicitly if you want writes to work
 (see Install section above).
+
+### Attachment storage
+
+For `attach_file`, three knobs in `[zotero]` control storage behavior:
+
+```toml
+[zotero]
+# Storage model for files attached via attach_file. "imported_file" (default)
+# uploads bytes to Zotero's cloud; "linked_file" stores only a path reference
+# (BYO storage, e.g. Resilio Sync, Syncthing).
+attachment_mode = "imported_file"
+
+# Required when attachment_mode = "linked_file". Files attached via
+# attach_file must live inside this directory.
+linked_attachment_base_dir = "/Users/you/Resilio/Zotero-Attachments"
+
+# Per-file size ceiling. Default: 50 MB.
+max_attachment_bytes = 52428800
+```
+
+## Integration test against your real Zotero library
+
+The unit tests use mocked HTTP servers and don't touch your library. A
+separate gated test exercises the write tools against the real Zotero
+Web API end-to-end. Useful when:
+
+- You're about to depend on `create_item` / `attach_file` / `attach_link`
+  in a workflow.
+- You've upgraded `zotero-mcp` and want to verify writes still work.
+- You're contributing changes that touch the write tools.
+
+Setup (one-time):
+
+1. Generate a Zotero Web API key with `library:write` permission at
+   <https://www.zotero.org/settings/keys>.
+2. In Zotero desktop, create a collection named `_zotero-mcp-test`. The
+   test scopes everything to this collection so a failure can't pollute
+   real data. Note its key (right-click → "Generate Report" or via the
+   Zotero connector — any way to get the 8-char collection key).
+3. Find your Zotero user ID at the same Settings page.
+
+Run:
+
+```bash
+ZOTERO_MCP_LIVE_API_KEY=<key> \
+ZOTERO_MCP_LIVE_USER_ID=<user-id> \
+ZOTERO_MCP_TEST_COLLECTION_KEY=<collection-key> \
+ZOTERO_MCP_TEST_PAUSE=1 \
+cargo test -p zotero-mcp --test writer_live_zotero -- --nocapture --ignored
+```
+
+`ZOTERO_MCP_TEST_PAUSE` triggers a manual-verification pause before
+teardown — open Zotero, navigate to the test collection, eyeball the
+created item and its two children, then press ENTER to let the test
+clean up.
 
 ## License
 
