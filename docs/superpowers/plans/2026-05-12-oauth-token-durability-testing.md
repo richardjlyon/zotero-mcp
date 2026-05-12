@@ -246,15 +246,17 @@ Goal: confirm `tokens.json` is created with correct permissions, that tokens sur
   ```
   If you see entries, the token in Cowork's request doesn't match what's in `tokens.json`. Possible cause: the access token in Cowork is stale from a previous session that wasn't cleared on reconnect.
 
-### 2.7 — Bounce launchd mid-conversation (the regression test)
+### 2.7 — Restart launchd mid-conversation (the regression test)
 
-This is the load-bearing test: BEFORE this fix, restarting the daemon would have invalidated the token and forced a fresh browser auth. AFTER this fix, the token survives.
+This is the load-bearing test: BEFORE this fix, restarting the server would have invalidated the token and forced a fresh browser auth. AFTER this fix, the token survives.
+
+The two `launchctl` commands below are a clean stop-then-start cycle of the server: `bootout` removes the running job; `bootstrap` reloads it from the plist. Together they simulate what macOS does on log out/in, system sleep/wake, or system updates.
 
 - [ ] **Action:**
   ```bash
-  launchctl bootout gui/$UID/com.zotero-mcp.http
+  launchctl bootout gui/$UID/com.zotero-mcp.http      # stop the running server
   sleep 2
-  launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.zotero-mcp.http.plist
+  launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.zotero-mcp.http.plist  # start it again
   sleep 3
   ```
   Then immediately switch to your active Cowork conversation (don't refresh the browser) and ask Claude to do another Zotero tool call — e.g., "now show me the abstract of the first one".
@@ -265,11 +267,11 @@ This is the load-bearing test: BEFORE this fix, restarting the daemon would have
   grep "validate_access" ~/Library/Logs/zotero-mcp/http.out.log | tail -5
   ```
 
-### 2.8 — Bounce mid-conversation a second time, with a 30-second wait
+### 2.8 — Restart again with a 30-second wait
 
 This catches subtle issues with SSE session reconnect.
 
-- [ ] **Action:** repeat 2.7 but wait 30 seconds before bouncing, and another 30 seconds before the next tool call.
+- [ ] **Action:** repeat the two launchctl commands from 2.7, but wait 30 seconds before running them, and another 30 seconds before the next tool call.
 - [ ] **Expected:** still works without re-auth.
 
 **End of Phase 2.** The core regression is verified. You can safely use Cowork normally from this point.
@@ -344,7 +346,7 @@ This phase only matters if you want to verify the refresh code itself. Skip if y
   ```toml
   access_token_ttl_secs = 90
   ```
-  Then bounce launchd:
+  Then restart the server (stop + start cycle of the launchd job):
   ```bash
   launchctl bootout gui/$UID/com.zotero-mcp.http
   sleep 1
@@ -391,7 +393,7 @@ If refresh worked, the new access token should share a `chain_id` with the origi
 
 ### 4.5 — Restore the normal access TTL
 
-- [ ] **Action:** remove the `access_token_ttl_secs = 90` line from `oauth.toml` (or change to `604800`). Bounce launchd.
+- [ ] **Action:** remove the `access_token_ttl_secs = 90` line from `oauth.toml` (or change to `604800`). Restart the server with the same `bootout` + `bootstrap` pair from step 4.1.
 - [ ] **Expected:** server restarts with 7-day default.
 
 **End of Phase 4.** Refresh path is verified for spec-compliant clients.
@@ -664,7 +666,7 @@ zotero-mcp status
 # Watch logs in real time
 tail -f ~/Library/Logs/zotero-mcp/http.out.log
 
-# Quick bounce (the canonical "restart server" command)
+# Restart the server (stop + start of the launchd job)
 launchctl bootout gui/$UID/com.zotero-mcp.http && \
   sleep 1 && \
   launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.zotero-mcp.http.plist
