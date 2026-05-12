@@ -230,6 +230,23 @@ impl TokenStore {
         })
     }
 
+    /// Validate an access token. Returns `true` iff the token was issued, has
+    /// not expired, and its chain has not been revoked.
+    pub async fn validate_access(&self, raw: &str) -> bool {
+        let hash = sha256_hex(raw);
+        let idx = self.inner.state.read().await;
+        let Some(record) = idx.access_by_hash.get(&hash) else {
+            return false;
+        };
+        if record.expires_at <= unix_now() {
+            return false;
+        }
+        if idx.revoked.contains(&record.chain_id) {
+            return false;
+        }
+        true
+    }
+
     /// Serialize the current index back to a Snapshot and atomically write
     /// the file (temp + rename). On failure, log and continue.
     fn persist_locked(&self, idx: &Index) {
@@ -471,5 +488,36 @@ mod tests {
             .unwrap();
         assert_eq!(first.chain_id, second.chain_id);
         assert_ne!(first.access_token, second.access_token);
+    }
+
+    #[tokio::test]
+    async fn validate_access_returns_true_for_freshly_minted_token() {
+        let dir = TempDir::new().unwrap();
+        let store = fresh(&dir);
+        let pair = store.mint_pair(None).await.unwrap();
+        assert!(store.validate_access(&pair.access_token).await);
+    }
+
+    #[tokio::test]
+    async fn validate_access_returns_false_for_unknown_token() {
+        let dir = TempDir::new().unwrap();
+        let store = fresh(&dir);
+        assert!(!store.validate_access("not-a-real-token").await);
+    }
+
+    #[tokio::test]
+    async fn validate_access_returns_false_after_expiry() {
+        let dir = TempDir::new().unwrap();
+        let store = TokenStore::load(
+            dir.path().join("tokens.json"),
+            "client-id-1",
+            Duration::from_secs(0),    // immediate expiry
+            Duration::from_secs(600),
+        )
+        .unwrap();
+        let pair = store.mint_pair(None).await.unwrap();
+        // Sleep 1s so unix-second resolution lapses past expires_at.
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert!(!store.validate_access(&pair.access_token).await);
     }
 }
