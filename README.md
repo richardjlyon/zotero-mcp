@@ -192,10 +192,8 @@ The OAuth flow itself follows the spec: `authorization_code` with PKCE
 (SHA-256, base64url, no pad), discovery via
 `/.well-known/oauth-protected-resource` and
 `/.well-known/oauth-authorization-server`, 401 challenges per RFC 9728.
-Access tokens are opaque 32-byte hex strings with a 1-hour TTL;
-authorization codes have a 5-minute TTL and are single-use. Both stores are
-**in-memory only** — restarting `zotero-mcp` invalidates every token and
-clients re-acquire on the next 401.
+Access tokens are opaque 32-byte hex strings; authorization codes have a
+5-minute TTL and are single-use.
 
 **Redirect URI allowlist** is hardcoded to `https://claude.ai/api/mcp/*`
 and `https://claude.com/api/mcp/*`. If you're integrating with a different
@@ -206,6 +204,39 @@ in `crates/zotero-mcp/src/oauth.rs` and rebuild.
 (`launchctl bootout … && launchctl bootstrap …`, or `zotero-mcp setup`
 again). A fresh pair is generated on first start; re-paste the new
 credentials into Claude.ai's connector config.
+
+### Token durability
+
+Access and refresh tokens are persisted to `<config_dir>/tokens.json` (mode 0600,
+hashed at rest with SHA-256). This means OAuth sessions survive `launchd`
+restarts, system sleep, log out/in, and `zotero-mcp setup` re-bootstrap — the
+connector keeps working without re-authenticating in the browser.
+
+Default TTLs:
+
+| Token | Default TTL | Override field in `oauth.toml` |
+|---|---|---|
+| Access token | 7 days | `access_token_ttl_secs` |
+| Refresh token | 90 days | `refresh_token_ttl_secs` |
+
+The 7-day access TTL is a workaround for the [open Anthropic bug](https://github.com/anthropics/claude-ai-mcp/issues/228) where
+`mcp-proxy.anthropic.com` ignores refresh tokens. Once Anthropic ships their proxy fix, you can lower this back to 1 hour:
+
+```toml
+access_token_ttl_secs = 3600
+```
+
+Refresh tokens follow OAuth 2.1 §4.3.1: one-time-use with rotation. If a refresh
+token is replayed (a leak signal), the entire token chain is revoked and you're
+forced through one fresh browser auth.
+
+To revoke all tokens manually:
+
+```bash
+rm "$HOME/Library/Application Support/dev.zotero-mcp.zotero-mcp/tokens.json"
+launchctl bootout gui/$UID/com.zotero-mcp.http
+launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.zotero-mcp.http.plist
+```
 
 ## Use it
 

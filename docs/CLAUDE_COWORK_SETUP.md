@@ -124,7 +124,7 @@ Claude.ai handles the rest:
 4. We redirect to `https://claude.ai/api/mcp/auth_callback?code=…&state=…`.
 5. Claude.ai posts to `/oauth/token` with the code + `code_verifier`.
    We verify `SHA256(verifier) == stored code_challenge` and mint a
-   1-hour Bearer access token.
+   Bearer access token (default 7-day TTL; see Token lifecycle below).
 6. Claude.ai retries `/sse` with `Authorization: Bearer …` and the
    Zotero tools start working.
 
@@ -135,14 +135,29 @@ in Cowork's tool list.
 
 ### Token lifecycle
 
-Access tokens live in memory only — they have a 1-hour TTL and a
-server restart invalidates every outstanding one. Claude.ai detects
-the 401 on the next request and silently re-runs the OAuth flow.
-This is also the recommended way to **revoke all sessions**: restart
-the launchd job.
+Access and refresh tokens are persisted to
+`~/Library/Application Support/dev.zotero-mcp.zotero-mcp/tokens.json`
+(mode `0600`, hashed at rest with SHA-256). Sessions survive `launchd`
+restarts, system sleep, and log out/in — the connector keeps working
+without re-authenticating in the browser.
+
+Default TTLs: access tokens 7 days, refresh tokens 90 days. Both are
+configurable in `oauth.toml` via `access_token_ttl_secs` and
+`refresh_token_ttl_secs`. The 7-day access TTL is a workaround for an
+[open Anthropic proxy bug](https://github.com/anthropics/claude-ai-mcp/issues/228)
+that ignores refresh tokens; once that is fixed you can lower it back to
+3600 (1 hour).
+
+Refresh tokens follow OAuth 2.1 §4.3.1 one-time-use rotation. Replaying
+a refresh token triggers chain-wide revocation and forces a fresh browser
+auth.
+
+To **revoke all sessions** manually:
 
 ```bash
-launchctl kickstart -k gui/$(id -u)/com.zotero-mcp.http
+rm "$HOME/Library/Application Support/dev.zotero-mcp.zotero-mcp/tokens.json"
+launchctl bootout gui/$UID/com.zotero-mcp.http
+launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.zotero-mcp.http.plist
 ```
 
 ### Rotating the OAuth client credentials
