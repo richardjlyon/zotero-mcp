@@ -385,7 +385,7 @@ async fn handle_client_credentials(
         Ok(p) => p,
         Err(e) => {
             tracing::error!(error = %e, "mint_pair failed for client_credentials");
-            return invalid_client();
+            return server_error();
         }
     };
     let token = pair.access_token;
@@ -451,7 +451,7 @@ async fn handle_authorization_code(
         Ok(p) => p,
         Err(e) => {
             tracing::error!(error = %e, "mint_pair failed for authorization_code");
-            return invalid_client();
+            return server_error();
         }
     };
     let token = pair.access_token;
@@ -604,6 +604,17 @@ fn invalid_client() -> axum::response::Response {
         [(header::WWW_AUTHENTICATE, "Basic realm=\"oauth/token\"")],
         Json(OAuthError {
             error: "invalid_client",
+            error_description: None,
+        }),
+    )
+        .into_response()
+}
+
+fn server_error() -> axum::response::Response {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(OAuthError {
+            error: "server_error",
             error_description: None,
         }),
     )
