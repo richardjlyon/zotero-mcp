@@ -100,6 +100,16 @@ fn sha256_hex(input: &str) -> String {
     hex
 }
 
+/// Result of `mint_pair`. Caller is expected to return these to the OAuth client.
+#[derive(Debug, Clone)]
+pub struct MintedPair {
+    pub access_token: String,
+    pub refresh_token: String,
+    pub access_ttl: Duration,
+    pub refresh_ttl: Duration,
+    pub chain_id: ChainId,
+}
+
 impl TokenStore {
     /// Load (or initialize) the store at `path`.
     ///
@@ -120,12 +130,20 @@ impl TokenStore {
                 Ok(_) | Err(_) => {
                     let backup =
                         path.with_extension(format!("json.broken-{}", unix_now()));
-                    let _ = std::fs::rename(&path, &backup);
-                    tracing::warn!(
-                        path = %path.display(),
-                        backup = %backup.display(),
-                        "tokens.json corrupt or wrong schema version; renamed aside, starting fresh"
-                    );
+                    if let Err(e) = std::fs::rename(&path, &backup) {
+                        tracing::warn!(
+                            path = %path.display(),
+                            backup = %backup.display(),
+                            error = %e,
+                            "tokens.json corrupt or wrong schema version; could not rename aside (continuing with empty store)"
+                        );
+                    } else {
+                        tracing::warn!(
+                            path = %path.display(),
+                            backup = %backup.display(),
+                            "tokens.json corrupt or wrong schema version; renamed aside, starting fresh"
+                        );
+                    }
                     Snapshot::default()
                 }
             },
@@ -170,6 +188,99 @@ impl TokenStore {
             }),
         })
     }
+
+    /// Mint a new (access, refresh) pair. Pass `None` for `chain_id` to start
+    /// a new chain (use case: `authorization_code` grant). Pass `Some(id)` to
+    /// continue an existing chain (use case: `refresh_token` grant rotation).
+    /// Persists to disk before returning. On persist failure logs an error and
+    /// keeps the in-memory state — the caller still gets a valid pair.
+    pub async fn mint_pair(
+        &self,
+        chain_id: Option<ChainId>,
+    ) -> anyhow::Result<MintedPair> {
+        let chain_id = chain_id.unwrap_or_else(opaque_id);
+        let access_token = opaque_id();
+        let refresh_token = opaque_id();
+        let now = unix_now();
+        let access_record = AccessRecord {
+            token_hash: sha256_hex(&access_token),
+            expires_at: now + self.inner.access_ttl.as_secs(),
+            chain_id: chain_id.clone(),
+        };
+        let refresh_record = RefreshRecord {
+            token_hash: sha256_hex(&refresh_token),
+            expires_at: now + self.inner.refresh_ttl.as_secs(),
+            chain_id: chain_id.clone(),
+            consumed_at: None,
+        };
+
+        {
+            let mut idx = self.inner.state.write().await;
+            idx.access_by_hash.insert(access_record.token_hash.clone(), access_record);
+            idx.refresh_by_hash.insert(refresh_record.token_hash.clone(), refresh_record);
+            self.persist_locked(&idx);
+        }
+
+        Ok(MintedPair {
+            access_token,
+            refresh_token,
+            access_ttl: self.inner.access_ttl,
+            refresh_ttl: self.inner.refresh_ttl,
+            chain_id,
+        })
+    }
+
+    /// Serialize the current index back to a Snapshot and atomically write
+    /// the file (temp + rename). On failure, log and continue.
+    fn persist_locked(&self, idx: &Index) {
+        let mut access: Vec<_> = idx.access_by_hash.values().cloned().collect();
+        let mut refresh: Vec<_> = idx.refresh_by_hash.values().cloned().collect();
+        access.sort_by(|a, b| a.token_hash.cmp(&b.token_hash));
+        refresh.sort_by(|a, b| a.token_hash.cmp(&b.token_hash));
+        let mut revoked: Vec<_> = idx.revoked.iter().cloned().collect();
+        revoked.sort();
+
+        let snap = Snapshot {
+            version: SCHEMA_VERSION,
+            client_id_hash: self.inner.client_id_hash.clone(),
+            access,
+            refresh,
+            revoked_chains: revoked,
+        };
+        let bytes = match serde_json::to_vec_pretty(&snap) {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::error!(error = %e, "could not serialize token snapshot; in-memory state preserved");
+                return;
+            }
+        };
+        if let Err(e) = atomic_write_0600(&self.inner.path, &bytes) {
+            tracing::error!(
+                path = %self.inner.path.display(),
+                error = %e,
+                "could not persist tokens.json; in-memory state preserved"
+            );
+        }
+    }
+}
+
+fn opaque_id() -> String {
+    format!("{:032x}", rand::random::<u128>())
+}
+
+fn atomic_write_0600(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_extension(format!("json.tmp.{:08x}", rand::random::<u32>()));
+    std::fs::write(&tmp, bytes)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
+    }
+    std::fs::rename(&tmp, path)?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -299,5 +410,66 @@ mod tests {
             Duration::from_secs(600),
         )
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn mint_pair_returns_two_distinct_tokens() {
+        let dir = TempDir::new().unwrap();
+        let store = fresh(&dir);
+        let pair = store.mint_pair(None).await.unwrap();
+        assert_ne!(pair.access_token, pair.refresh_token);
+        assert!(pair.access_token.len() >= 32);
+        assert!(pair.refresh_token.len() >= 32);
+        assert!(!pair.chain_id.is_empty());
+    }
+
+    #[tokio::test]
+    async fn mint_pair_persists_to_disk_with_mode_0600() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("tokens.json");
+        let store = fresh_with_path(&path);
+        let _ = store.mint_pair(None).await.unwrap();
+        assert!(path.exists(), "mint_pair must persist to disk");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+    }
+
+    #[tokio::test]
+    async fn tokens_at_rest_are_hashed_not_plaintext() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("tokens.json");
+        let store = fresh_with_path(&path);
+        let pair = store.mint_pair(None).await.unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        let body = String::from_utf8(bytes).unwrap();
+        assert!(
+            !body.contains(&pair.access_token),
+            "raw access token must not appear on disk"
+        );
+        assert!(
+            !body.contains(&pair.refresh_token),
+            "raw refresh token must not appear on disk"
+        );
+        assert!(
+            body.contains(&sha256_hex(&pair.access_token)),
+            "expected access-token hash in file"
+        );
+    }
+
+    #[tokio::test]
+    async fn mint_pair_with_existing_chain_id_keeps_chain() {
+        let dir = TempDir::new().unwrap();
+        let store = fresh(&dir);
+        let first = store.mint_pair(None).await.unwrap();
+        let second = store
+            .mint_pair(Some(first.chain_id.clone()))
+            .await
+            .unwrap();
+        assert_eq!(first.chain_id, second.chain_id);
+        assert_ne!(first.access_token, second.access_token);
     }
 }
