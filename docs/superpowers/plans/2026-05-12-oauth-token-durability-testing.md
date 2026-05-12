@@ -267,12 +267,19 @@ The two `launchctl` commands below are a clean stop-then-start cycle of the serv
   grep "validate_access" ~/Library/Logs/zotero-mcp/http.out.log | tail -5
   ```
 
-### 2.8 — Restart again with a 30-second wait
+### 2.8 — Restart again with idle waits before and after
 
-This catches subtle issues with SSE session reconnect.
+Step 2.7 restarts immediately and tests right away. This step adds idle time on either side of the restart, which catches subtle SSE reconnect bugs that don't surface in the immediate case (idle connections behave differently from active ones; Cowork may cache token state briefly).
 
-- [ ] **Action:** repeat the two launchctl commands from 2.7, but wait 30 seconds before running them, and another 30 seconds before the next tool call.
-- [ ] **Expected:** still works without re-auth.
+You should be in a Cowork conversation that completed a tool call at the end of step 2.7. From that moment:
+
+- [ ] **Action:**
+  1. Wait 30 seconds. Don't touch Cowork — let the connection sit idle.
+  2. Run the two `launchctl` commands from 2.7 (`bootout`, then `bootstrap`).
+  3. Wait another 30 seconds.
+  4. Make another Zotero tool call in the same Cowork conversation.
+- [ ] **Expected:** the tool call succeeds with no reconnect prompt.
+- [ ] **Fail:** if Cowork prompts to reconnect or the call 401s, the SSE-resume path has a bug not caught by 2.7. Check `~/Library/Logs/zotero-mcp/http.err.log` for SSE-related warnings.
 
 **End of Phase 2.** The core regression is verified. You can safely use Cowork normally from this point.
 
