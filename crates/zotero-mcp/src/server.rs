@@ -89,7 +89,7 @@ impl ZoteroServer {
         att::list_attachments_t(&self.state, args).await
     }
 
-    #[tool(description = "Get the absolute filesystem path to a Zotero attachment.")]
+    #[tool(description = "Get the absolute filesystem path to a Zotero attachment. For text extraction prefer get_pdf_text — it has built-in fallback to pdftotext on PDFs that trip pdf-extract. Use this path only when you need raw bytes (e.g. binary handling, OCR pipelines).")]
     pub async fn get_pdf_path(
         &self,
         #[tool(aggr)] args: AttachItemKey,
@@ -97,7 +97,7 @@ impl ZoteroServer {
         att::get_pdf_path(&self.state, args).await
     }
 
-    #[tool(description = "Read full extracted PDF text for an item (uses Zotero's .zotero-ft-cache when present).")]
+    #[tool(description = "Read full extracted PDF text for an item. Resolution order: .zotero-ft-cache → in-process pdf-extract → pdftotext fallback (automatic, when Poppler is on PATH). The `source` field on the response identifies which engine succeeded (zotero_cache | live_extract | pdftotext_fallback). Callers do not need to handle fallback manually — extraction is resilient to PDFs that trip pdf-extract.")]
     pub async fn get_pdf_text(
         &self,
         #[tool(aggr)] args: AttachItemKey,
@@ -105,7 +105,7 @@ impl ZoteroServer {
         att::get_pdf_text_t(&self.state, args).await
     }
 
-    #[tool(description = "Read the first N pages of a PDF (default 2). Useful for cheap context grabs.")]
+    #[tool(description = "Read the first N pages of a PDF (default 2). Useful for cheap context grabs. Uses the same resilient extraction chain as get_pdf_text (cache → pdf-extract → pdftotext fallback).")]
     pub async fn get_pdf_first_pages(
         &self,
         #[tool(aggr)] args: FirstPagesArgs,
