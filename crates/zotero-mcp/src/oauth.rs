@@ -245,7 +245,7 @@ impl OAuthState {
 
     /// Crate-internal access to the token store — used by tests in sibling
     /// modules that need to mint a token without going through the HTTP layer.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn token_store(&self) -> &TokenStore {
         &self.inner.tokens
     }
