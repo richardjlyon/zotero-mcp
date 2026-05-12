@@ -102,6 +102,20 @@ async fn live_create_item_attach_file_attach_link_roundtrip() {
         std::io::stdin().read_line(&mut s).unwrap();
     }
 
+    // `ZOTERO_MCP_TEST_KEEP` lets the operator verify the item out-of-band
+    // (e.g. via a separate Zotero desktop session) and run teardown manually
+    // afterwards. Useful when stdin isn't a TTY and the pause prompt above
+    // can't actually wait.
+    if env::var("ZOTERO_MCP_TEST_KEEP").is_ok() {
+        println!(
+            "ZOTERO_MCP_TEST_KEEP set; skipping teardown. To delete manually:\n  \
+            curl -X DELETE -H 'Authorization: Bearer $ZOTERO_MCP_LIVE_API_KEY' \
+            -H 'Zotero-API-Version: 3' -H 'If-Unmodified-Since-Version: 99999999' \
+            https://api.zotero.org/users/{user_id}/items/{parent_key}"
+        );
+        return;
+    }
+
     // Step 5: Teardown — delete the parent. Children auto-trash with it.
     // Zotero requires an `If-Unmodified-Since-Version` header on DELETE
     // (otherwise 428 Precondition Required). The parent's version has been
