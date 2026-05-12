@@ -217,4 +217,87 @@ mod tests {
             "expected backup file, got {entries:?}"
         );
     }
+
+    #[test]
+    fn load_wipes_store_on_client_id_hash_mismatch() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("tokens.json");
+        let snap = Snapshot {
+            version: SCHEMA_VERSION,
+            client_id_hash: sha256_hex("OLD-CLIENT-ID"),
+            access: vec![AccessRecord {
+                token_hash: "deadbeef".into(),
+                expires_at: unix_now() + 9999,
+                chain_id: "chain-x".into(),
+            }],
+            refresh: vec![],
+            revoked_chains: vec![],
+        };
+        std::fs::write(&path, serde_json::to_vec(&snap).unwrap()).unwrap();
+
+        let store = TokenStore::load(
+            path,
+            "NEW-CLIENT-ID",
+            Duration::from_secs(60),
+            Duration::from_secs(600),
+        )
+        .unwrap();
+        let idx = store.inner.state.try_read().unwrap();
+        assert!(idx.access_by_hash.is_empty(), "tokens issued under old client_id must be wiped");
+    }
+
+    #[test]
+    fn load_drops_expired_access_and_refresh_records() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("tokens.json");
+        let now = unix_now();
+        let snap = Snapshot {
+            version: SCHEMA_VERSION,
+            client_id_hash: sha256_hex("client-id-1"),
+            access: vec![
+                AccessRecord {
+                    token_hash: "fresh-access".into(),
+                    expires_at: now + 600,
+                    chain_id: "c1".into(),
+                },
+                AccessRecord {
+                    token_hash: "stale-access".into(),
+                    expires_at: now - 1,
+                    chain_id: "c1".into(),
+                },
+            ],
+            refresh: vec![
+                RefreshRecord {
+                    token_hash: "fresh-refresh".into(),
+                    expires_at: now + 600,
+                    chain_id: "c1".into(),
+                    consumed_at: None,
+                },
+                RefreshRecord {
+                    token_hash: "stale-refresh".into(),
+                    expires_at: now - 1,
+                    chain_id: "c1".into(),
+                    consumed_at: None,
+                },
+            ],
+            revoked_chains: vec![],
+        };
+        std::fs::write(&path, serde_json::to_vec(&snap).unwrap()).unwrap();
+        let store = fresh_with_path(&path);
+        let idx = store.inner.state.try_read().unwrap();
+        assert!(idx.access_by_hash.contains_key("fresh-access"));
+        assert!(!idx.access_by_hash.contains_key("stale-access"));
+        assert!(idx.refresh_by_hash.contains_key("fresh-refresh"));
+        assert!(!idx.refresh_by_hash.contains_key("stale-refresh"));
+    }
+
+    fn fresh_with_path(path: &Path) -> TokenStore {
+        TokenStore::load(
+            path.to_path_buf(),
+            "client-id-1",
+            Duration::from_secs(60),
+            Duration::from_secs(600),
+        )
+        .unwrap()
+    }
 }
