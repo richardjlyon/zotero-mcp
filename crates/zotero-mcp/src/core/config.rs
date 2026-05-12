@@ -51,10 +51,36 @@ pub struct ZoteroConfig {
     /// `pdf-extract` engine fails. Default: true.
     #[serde(default = "default_true")]
     pub pdftotext_fallback: bool,
+
+    /// Storage model for attachments created via `attach_file`. Default
+    /// mirrors Zotero's own default behaviour. Set to `"linked_file"` for
+    /// BYO-storage users (Resilio Sync, Syncthing, NAS-backed Zotero data dirs).
+    #[serde(default = "default_attachment_mode")]
+    pub attachment_mode: String,
+
+    /// Required when `attachment_mode = "linked_file"`. Absolute path to the
+    /// Zotero "Linked Attachment Base Directory" (Zotero Preferences →
+    /// Advanced → Files & Folders). Files attached via `attach_file` must
+    /// live inside this directory.
+    #[serde(default)]
+    pub linked_attachment_base_dir: Option<String>,
+
+    /// Per-file size ceiling for `attach_file`. Anything larger is rejected
+    /// pre-flight. Default: 50 MB.
+    #[serde(default = "default_max_attachment_bytes")]
+    pub max_attachment_bytes: usize,
 }
 
 fn default_true() -> bool {
     true
+}
+
+fn default_attachment_mode() -> String {
+    "imported_file".into()
+}
+
+fn default_max_attachment_bytes() -> usize {
+    50 * 1024 * 1024
 }
 
 impl Default for ZoteroConfig {
@@ -70,6 +96,9 @@ impl Default for ZoteroConfig {
             max_schema_userdata: 135,
             pdftotext_path: None,
             pdftotext_fallback: true,
+            attachment_mode: "imported_file".into(),
+            linked_attachment_base_dir: None,
+            max_attachment_bytes: 50 * 1024 * 1024,
         }
     }
 }
@@ -259,5 +288,30 @@ pdftotext_fallback = false
         let c: Config = toml::from_str(toml).unwrap();
         assert_eq!(c.zotero.pdftotext_path.as_deref(), Some("/opt/homebrew/bin/pdftotext"));
         assert!(!c.zotero.pdftotext_fallback);
+    }
+
+    #[test]
+    fn attachment_mode_defaults_to_imported_file() {
+        let c = Config::default();
+        assert_eq!(c.zotero.attachment_mode, "imported_file");
+        assert!(c.zotero.linked_attachment_base_dir.is_none());
+        assert_eq!(c.zotero.max_attachment_bytes, 50 * 1024 * 1024);
+    }
+
+    #[test]
+    fn attachment_mode_parses_from_toml() {
+        let toml = r#"
+[zotero]
+attachment_mode = "linked_file"
+linked_attachment_base_dir = "/Users/rjl/Resilio/Zotero-Attachments"
+max_attachment_bytes = 104857600
+"#;
+        let c: Config = toml::from_str(toml).unwrap();
+        assert_eq!(c.zotero.attachment_mode, "linked_file");
+        assert_eq!(
+            c.zotero.linked_attachment_base_dir.as_deref(),
+            Some("/Users/rjl/Resilio/Zotero-Attachments")
+        );
+        assert_eq!(c.zotero.max_attachment_bytes, 104857600);
     }
 }
