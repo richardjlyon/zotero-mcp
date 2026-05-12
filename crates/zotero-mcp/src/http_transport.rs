@@ -322,4 +322,36 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
     }
+
+    #[tokio::test]
+    async fn tokens_survive_oauth_state_recreation() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let tokens_path = dir.path().join("tokens.json");
+        let config = OAuthConfig {
+            client_id: "test-id".into(),
+            client_secret: "test-secret".into(),
+            issuer: "https://example.test".into(),
+            access_token_ttl_secs: None,
+            refresh_token_ttl_secs: None,
+        };
+
+        // Simulate the HTTP server's first lifetime: mint a token via the store
+        // accessor, then drop everything as if launchd killed the process.
+        let access_token = {
+            let state_a = OAuthState::with_tokens_path(config.clone(), tokens_path.clone()).unwrap();
+            let pair = state_a.token_store().mint_pair(None).await.unwrap();
+            assert!(state_a.validate_token(&pair.access_token).await);
+            pair.access_token
+        };
+
+        // Simulate launchd restart: brand-new OAuthState reading the same file.
+        let state_b = OAuthState::with_tokens_path(config, tokens_path).unwrap();
+
+        // The original access token MUST still validate. This is the regression
+        // test for the in-memory-only token bug we shipped before.
+        assert!(
+            state_b.validate_token(&access_token).await,
+            "access token issued before restart must still validate after restart"
+        );
+    }
 }
