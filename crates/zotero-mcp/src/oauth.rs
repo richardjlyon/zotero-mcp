@@ -286,7 +286,7 @@ async fn authorization_server_metadata(
         authorization_endpoint: format!("{issuer}/authorize"),
         token_endpoint: format!("{issuer}/oauth/token"),
         issuer,
-        grant_types_supported: &["authorization_code", "client_credentials"],
+        grant_types_supported: &["authorization_code", "refresh_token", "client_credentials"],
         token_endpoint_auth_methods_supported: &["client_secret_post", "client_secret_basic"],
         response_types_supported: &["code", "token"],
         code_challenge_methods_supported: &["S256"],
@@ -859,6 +859,7 @@ mod tests {
         assert!(body.contains("\"token_endpoint\":\"https://example.test/oauth/token\""));
         assert!(body.contains("\"authorization_code\""));
         assert!(body.contains("\"client_credentials\""));
+        assert!(body.contains("\"refresh_token\""), "discovery must advertise refresh_token grant; body was: {body}");
         assert!(body.contains("\"code_challenge_methods_supported\":[\"S256\"]"));
 
         let resp = app
