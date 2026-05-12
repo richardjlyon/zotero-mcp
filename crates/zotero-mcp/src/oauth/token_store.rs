@@ -282,6 +282,14 @@ impl TokenStore {
         Ok(chain_id)
     }
 
+    /// Mark a chain as revoked. All access tokens in this chain stop validating
+    /// immediately; any refresh tokens in this chain stop being consumable.
+    pub async fn revoke_chain(&self, chain_id: ChainId) {
+        let mut idx = self.inner.state.write().await;
+        idx.revoked.insert(chain_id);
+        self.persist_locked(&idx);
+    }
+
     /// Serialize the current index back to a Snapshot and atomically write
     /// the file (temp + rename). On failure, log and continue.
     fn persist_locked(&self, idx: &Index) {
@@ -600,5 +608,43 @@ mod tests {
         tokio::time::sleep(Duration::from_secs(1)).await;
         let err = store.consume_refresh(&pair.refresh_token).await.unwrap_err();
         assert!(matches!(err, RefreshError::Expired), "got {err:?}");
+    }
+
+    #[tokio::test]
+    async fn revoke_chain_invalidates_all_access_tokens_in_chain() {
+        let dir = TempDir::new().unwrap();
+        let store = fresh(&dir);
+        let pair = store.mint_pair(None).await.unwrap();
+        assert!(store.validate_access(&pair.access_token).await);
+        store.revoke_chain(pair.chain_id.clone()).await;
+        assert!(!store.validate_access(&pair.access_token).await);
+    }
+
+    #[tokio::test]
+    async fn revoke_chain_invalidates_subsequent_refresh_consumption() {
+        let dir = TempDir::new().unwrap();
+        let store = fresh(&dir);
+        let pair = store.mint_pair(None).await.unwrap();
+        store.revoke_chain(pair.chain_id.clone()).await;
+        let err = store.consume_refresh(&pair.refresh_token).await.unwrap_err();
+        // Replay would be wrong — the token was never consumed; correct error
+        // is that the chain is revoked. We treat that as Unknown for the caller
+        // (no point telling the world which chain). Adjust below if needed.
+        assert!(
+            matches!(err, RefreshError::Unknown),
+            "revoked-chain refresh should look Unknown to callers; got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn revoke_chain_persists_to_disk() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("tokens.json");
+        let store = fresh_with_path(&path);
+        let pair = store.mint_pair(None).await.unwrap();
+        store.revoke_chain(pair.chain_id.clone()).await;
+        drop(store);
+        let store2 = fresh_with_path(&path);
+        assert!(!store2.validate_access(&pair.access_token).await);
     }
 }
