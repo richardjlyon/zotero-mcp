@@ -1,6 +1,6 @@
 use serde_json::json;
 use std::path::PathBuf;
-use wiremock::matchers::{body_partial_json, header, method, path};
+use wiremock::matchers::{body_partial_json, body_string_contains, header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 use zotero_mcp::core::error::Error;
 use zotero_mcp::core::writer::attachments::{attach_file, AttachFileOptions, AttachmentMode};
@@ -159,5 +159,189 @@ async fn attach_file_returns_too_large_when_over_limit() {
             assert_eq!(limit, 100);
         }
         other => panic!("expected AttachmentTooLarge, got {:?}", other),
+    }
+}
+
+const HELLO_PDF: &[u8] = include_bytes!("fixtures/hello.pdf");
+
+fn write_hello(dir: &std::path::Path) -> PathBuf {
+    let p = dir.join("hello.pdf");
+    std::fs::write(&p, HELLO_PDF).unwrap();
+    p
+}
+
+fn md5_hex(bytes: &[u8]) -> String {
+    use md5::{Digest, Md5};
+    let mut h = Md5::new();
+    h.update(bytes);
+    let digest = h.finalize();
+    let mut s = String::with_capacity(32);
+    for b in digest {
+        s.push_str(&format!("{:02x}", b));
+    }
+    s
+}
+
+#[tokio::test]
+async fn imported_file_md5_exists_short_circuits_upload() {
+    let dir = tempfile::tempdir().unwrap();
+    let file_path = write_hello(dir.path());
+    let md5 = md5_hex(HELLO_PDF);
+
+    let server = MockServer::start().await;
+
+    // Step 5.1a: create attachment item.
+    Mock::given(method("POST"))
+        .and(path("/users/93338/items"))
+        .and(body_partial_json(json!([{
+            "itemType": "attachment",
+            "parentItem": "PARENT01",
+            "linkMode": "imported_file",
+            "filename": "hello.pdf",
+            "contentType": "application/pdf",
+            "md5": md5
+        }])))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "successful": { "0": { "key": "ATT00001", "version": 1 } }
+        })))
+        .mount(&server)
+        .await;
+
+    // Step 5.1b: authorize -> exists:1 short-circuit.
+    Mock::given(method("POST"))
+        .and(path("/users/93338/items/ATT00001/file"))
+        .and(header("If-None-Match", "*"))
+        .and(body_string_contains(format!("md5={md5}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "exists": 1 })))
+        .mount(&server)
+        .await;
+
+    // No step-5.1c PUT/register mocks — they must not be invoked.
+
+    let opts = AttachFileOptions {
+        mode: AttachmentMode::ImportedFile,
+        linked_attachment_base_dir: None,
+        max_attachment_bytes: 50 * 1024 * 1024,
+        filename: None,
+        content_type: None,
+    };
+    let key = attach_file(&api(&server.uri()), "PARENT01", &file_path, &opts)
+        .await
+        .unwrap();
+    assert_eq!(key, "ATT00001");
+}
+
+#[tokio::test]
+async fn imported_file_full_three_step_upload_succeeds() {
+    let dir = tempfile::tempdir().unwrap();
+    let file_path = write_hello(dir.path());
+    let md5 = md5_hex(HELLO_PDF);
+
+    let server = MockServer::start().await;
+    let s3 = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/users/93338/items"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "successful": { "0": { "key": "ATT00002", "version": 1 } }
+        })))
+        .mount(&server)
+        .await;
+
+    // Step 5.1b: authorize -> returns upload URL pointing at the s3 mock.
+    let upload_url = format!("{}/upload", s3.uri());
+    Mock::given(method("POST"))
+        .and(path("/users/93338/items/ATT00002/file"))
+        .and(body_string_contains(format!("md5={md5}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "url": upload_url,
+            "contentType": "application/octet-stream",
+            "prefix": "PFX",
+            "suffix": "SFX",
+            "uploadKey": "UPLOADKEY"
+        })))
+        .mount(&server)
+        .await;
+
+    // Step 5.1c.PUT: receives prefix + file_bytes + suffix.
+    let mut expected_body = b"PFX".to_vec();
+    expected_body.extend_from_slice(HELLO_PDF);
+    expected_body.extend_from_slice(b"SFX");
+    Mock::given(method("PUT"))
+        .and(path("/upload"))
+        .and(header("Content-Type", "application/octet-stream"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&s3)
+        .await;
+
+    // Step 5.1c.register: POST with ?upload=<key>.
+    Mock::given(method("POST"))
+        .and(path("/users/93338/items/ATT00002/file"))
+        .and(query_param("upload", "UPLOADKEY"))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&server)
+        .await;
+
+    let opts = AttachFileOptions {
+        mode: AttachmentMode::ImportedFile,
+        linked_attachment_base_dir: None,
+        max_attachment_bytes: 50 * 1024 * 1024,
+        filename: None,
+        content_type: None,
+    };
+    let key = attach_file(&api(&server.uri()), "PARENT01", &file_path, &opts)
+        .await
+        .unwrap();
+    assert_eq!(key, "ATT00002");
+}
+
+#[tokio::test]
+async fn imported_file_s3_put_failure_maps_to_upload_failed_stage_s3_put() {
+    let dir = tempfile::tempdir().unwrap();
+    let file_path = write_hello(dir.path());
+
+    let server = MockServer::start().await;
+    let s3 = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/users/93338/items"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "successful": { "0": { "key": "ATT00003", "version": 1 } }
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/users/93338/items/ATT00003/file"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "url": format!("{}/upload", s3.uri()),
+            "contentType": "application/octet-stream",
+            "prefix": "",
+            "suffix": "",
+            "uploadKey": "K"
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path("/upload"))
+        .respond_with(ResponseTemplate::new(500).set_body_string("S3 boom"))
+        .mount(&s3)
+        .await;
+
+    let opts = AttachFileOptions {
+        mode: AttachmentMode::ImportedFile,
+        linked_attachment_base_dir: None,
+        max_attachment_bytes: 50 * 1024 * 1024,
+        filename: None,
+        content_type: None,
+    };
+    let err = attach_file(&api(&server.uri()), "PARENT01", &file_path, &opts)
+        .await
+        .unwrap_err();
+    match err {
+        Error::UploadFailed { stage, detail } => {
+            assert_eq!(stage, "s3_put");
+            assert!(detail.contains("500") || detail.contains("S3 boom"));
+        }
+        other => panic!("expected UploadFailed(stage=s3_put), got {:?}", other),
     }
 }

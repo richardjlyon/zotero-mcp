@@ -11,6 +11,25 @@ use reqwest::Method;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
+fn md5_hex(bytes: &[u8]) -> String {
+    use md5::{Digest, Md5};
+    let mut h = Md5::new();
+    h.update(bytes);
+    let d = h.finalize();
+    let mut s = String::with_capacity(32);
+    for b in d {
+        s.push_str(&format!("{:02x}", b));
+    }
+    s
+}
+
+fn unix_ms_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 /// Attach a URL as a `linked_url` child to an existing parent item.
 ///
 /// One POST; no bytes transfer. Returns the new attachment item key.
@@ -145,11 +164,13 @@ pub async fn attach_file(
             attach_file_linked(api, parent_key, file_path, &filename, &content_type, opts).await
         }
         AttachmentMode::ImportedFile => {
-            // Implemented in Task 9.
-            Err(Error::UploadFailed {
-                stage: "init",
-                detail: "imported_file mode not yet implemented (Task 9)".into(),
-            })
+            let bytes = tokio::fs::read(file_path).await.map_err(|e| {
+                Error::UploadFailed {
+                    stage: "read",
+                    detail: format!("reading {}: {}", file_path.display(), e),
+                }
+            })?;
+            attach_file_imported(api, parent_key, &bytes, &filename, &content_type).await
         }
     }
 }
@@ -215,4 +236,233 @@ async fn attach_file_linked(
             status: status.as_u16(),
             body: v.to_string(),
         })
+}
+
+async fn attach_file_imported(
+    api: &LocalApi,
+    parent_key: &str,
+    bytes: &[u8],
+    filename: &str,
+    content_type: &str,
+) -> Result<String> {
+    let md5 = md5_hex(bytes);
+    let mtime = unix_ms_now();
+    let filesize = bytes.len();
+
+    // Step 5.1a: create the attachment row.
+    let attach_key = create_imported_attachment_row(
+        api, parent_key, filename, content_type, &md5, mtime,
+    )
+    .await?;
+
+    // Step 5.1b: authorize upload.
+    match authorize_upload(api, &attach_key, &md5, filename, filesize, mtime).await? {
+        AuthorizeResult::Exists => Ok(attach_key),
+        AuthorizeResult::NeedsUpload {
+            url,
+            content_type: upload_ct,
+            prefix,
+            suffix,
+            upload_key,
+        } => {
+            // Step 5.1c: PUT bytes to signed URL, then register upload.
+            put_to_s3(api, &url, &upload_ct, &prefix, bytes, &suffix).await?;
+            register_upload(api, &attach_key, &upload_key).await?;
+            Ok(attach_key)
+        }
+    }
+}
+
+async fn create_imported_attachment_row(
+    api: &LocalApi,
+    parent_key: &str,
+    filename: &str,
+    content_type: &str,
+    md5: &str,
+    mtime: u64,
+) -> Result<String> {
+    let body = json!([{
+        "itemType": "attachment",
+        "parentItem": parent_key,
+        "linkMode": "imported_file",
+        "title": filename,
+        "filename": filename,
+        "contentType": content_type,
+        "charset": "",
+        "md5": md5,
+        "mtime": mtime,
+        "tags": [],
+        "relations": {}
+    }]);
+    let resp = api
+        .write_request(Method::POST, "/items")?
+        .json(&body)
+        .send()
+        .await?;
+    let status = resp.status();
+    if !status.is_success() {
+        let body_text = resp.text().await.unwrap_or_default();
+        return Err(Error::LocalApi {
+            status: status.as_u16(),
+            body: body_text,
+        });
+    }
+    let v: Value = resp.json().await?;
+    v.get("successful")
+        .and_then(|s| s.get("0"))
+        .and_then(|i| i.get("key"))
+        .and_then(|k| k.as_str())
+        .map(|s| s.to_string())
+        .ok_or_else(|| Error::LocalApi {
+            status: status.as_u16(),
+            body: v.to_string(),
+        })
+}
+
+enum AuthorizeResult {
+    Exists,
+    NeedsUpload {
+        url: String,
+        content_type: String,
+        prefix: String,
+        suffix: String,
+        upload_key: String,
+    },
+}
+
+async fn authorize_upload(
+    api: &LocalApi,
+    attach_key: &str,
+    md5: &str,
+    filename: &str,
+    filesize: usize,
+    mtime: u64,
+) -> Result<AuthorizeResult> {
+    let body = format!(
+        "md5={md5}&filename={fn_enc}&filesize={size}&mtime={mtime}",
+        fn_enc = urlencoding::encode(filename),
+        size = filesize,
+    );
+    let resp = api
+        .write_request(Method::POST, &format!("/items/{attach_key}/file"))?
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .header("If-None-Match", "*")
+        .body(body)
+        .send()
+        .await
+        .map_err(|e| Error::UploadFailed {
+            stage: "authorize",
+            detail: e.to_string(),
+        })?;
+    let status = resp.status();
+    let v: Value = resp.json().await.map_err(|e| Error::UploadFailed {
+        stage: "authorize",
+        detail: format!("non-JSON response: {}", e),
+    })?;
+    if !status.is_success() {
+        return Err(Error::UploadFailed {
+            stage: "authorize",
+            detail: format!("{}: {}", status, v),
+        });
+    }
+    if v.get("exists").and_then(|x| x.as_i64()) == Some(1) {
+        return Ok(AuthorizeResult::Exists);
+    }
+    let url = v
+        .get("url")
+        .and_then(|x| x.as_str())
+        .ok_or_else(|| Error::UploadFailed {
+            stage: "authorize",
+            detail: format!("missing url in response: {}", v),
+        })?
+        .to_string();
+    let content_type = v
+        .get("contentType")
+        .and_then(|x| x.as_str())
+        .unwrap_or("application/octet-stream")
+        .to_string();
+    let prefix = v
+        .get("prefix")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
+    let suffix = v
+        .get("suffix")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
+    let upload_key = v
+        .get("uploadKey")
+        .and_then(|x| x.as_str())
+        .ok_or_else(|| Error::UploadFailed {
+            stage: "authorize",
+            detail: format!("missing uploadKey in response: {}", v),
+        })?
+        .to_string();
+    Ok(AuthorizeResult::NeedsUpload {
+        url,
+        content_type,
+        prefix,
+        suffix,
+        upload_key,
+    })
+}
+
+async fn put_to_s3(
+    api: &LocalApi,
+    url: &str,
+    content_type: &str,
+    prefix: &str,
+    bytes: &[u8],
+    suffix: &str,
+) -> Result<()> {
+    let mut body = Vec::with_capacity(prefix.len() + bytes.len() + suffix.len());
+    body.extend_from_slice(prefix.as_bytes());
+    body.extend_from_slice(bytes);
+    body.extend_from_slice(suffix.as_bytes());
+
+    let resp = api
+        .http
+        .put(url)
+        .header("Content-Type", content_type)
+        .body(body)
+        .send()
+        .await
+        .map_err(|e| Error::UploadFailed {
+            stage: "s3_put",
+            detail: e.to_string(),
+        })?;
+    let status = resp.status();
+    if !status.is_success() {
+        let detail = resp.text().await.unwrap_or_default();
+        return Err(Error::UploadFailed {
+            stage: "s3_put",
+            detail: format!("{}: {}", status, detail),
+        });
+    }
+    Ok(())
+}
+
+async fn register_upload(api: &LocalApi, attach_key: &str, upload_key: &str) -> Result<()> {
+    let resp = api
+        .write_request(
+            Method::POST,
+            &format!("/items/{attach_key}/file?upload={upload_key}"),
+        )?
+        .header("If-None-Match", "*")
+        .send()
+        .await
+        .map_err(|e| Error::UploadFailed {
+            stage: "register",
+            detail: e.to_string(),
+        })?;
+    let status = resp.status();
+    if !status.is_success() {
+        let detail = resp.text().await.unwrap_or_default();
+        return Err(Error::UploadFailed {
+            stage: "register",
+            detail: format!("{}: {}", status, detail),
+        });
+    }
+    Ok(())
 }
