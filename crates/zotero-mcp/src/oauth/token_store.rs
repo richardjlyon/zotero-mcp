@@ -151,7 +151,14 @@ impl TokenStore {
                 tracing::info!(path = %path.display(), "no tokens.json found; starting fresh");
                 Snapshot::default()
             }
-            Err(e) => return Err(anyhow::anyhow!("read {}: {e}", path.display())),
+            Err(e) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %e,
+                    "could not read tokens.json (transient I/O error?); starting fresh"
+                );
+                Snapshot::default()
+            }
         };
 
         if !snapshot.client_id_hash.is_empty() && snapshot.client_id_hash != client_id_hash {

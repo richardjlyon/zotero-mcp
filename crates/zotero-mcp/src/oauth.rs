@@ -364,7 +364,7 @@ async fn token_handler(
             Json(OAuthError {
                 error: "unsupported_grant_type",
                 error_description: Some(
-                    "only authorization_code and client_credentials are supported",
+                    "supported grant types: authorization_code, refresh_token, client_credentials",
                 ),
             }),
         )
@@ -551,7 +551,7 @@ fn token_ok_pair(pair: MintedPair) -> axum::response::Response {
 }
 
 fn invalid_grant(detail: &'static str) -> axum::response::Response {
-    tracing::info!(detail, "authorization_code grant rejected");
+    tracing::info!(detail, "OAuth grant rejected");
     (
         StatusCode::BAD_REQUEST,
         Json(OAuthError {
