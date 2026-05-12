@@ -420,3 +420,179 @@ mod engine_tests {
         assert!(matches!(res, Err(EngineError::Failed(_))));
     }
 }
+
+#[cfg(test)]
+mod orchestrator_tests {
+    use super::*;
+    use std::sync::Mutex;
+    use tempfile::TempDir;
+
+    /// A stub engine that returns a queued sequence of results, one per call.
+    struct StubEngine {
+        queue: Mutex<Vec<std::result::Result<String, EngineError>>>,
+    }
+
+    impl StubEngine {
+        fn new(results: Vec<std::result::Result<String, EngineError>>) -> Arc<dyn PdfEngine> {
+            Arc::new(Self { queue: Mutex::new(results) })
+        }
+        fn ok(text: &str) -> Arc<dyn PdfEngine> {
+            Self::new(vec![Ok(text.into())])
+        }
+        fn fail(msg: &str) -> Arc<dyn PdfEngine> {
+            Self::new(vec![Err(EngineError::Failed(msg.into()))])
+        }
+        fn timeout(secs: u64) -> Arc<dyn PdfEngine> {
+            Self::new(vec![Err(EngineError::Timeout(secs))])
+        }
+        fn never() -> Arc<dyn PdfEngine> {
+            // Returns a panic on call so we can assert "not called".
+            struct Panicker;
+            #[async_trait]
+            impl PdfEngine for Panicker {
+                async fn extract(&self, _: &Path) -> std::result::Result<String, EngineError> {
+                    panic!("engine should not have been called");
+                }
+            }
+            Arc::new(Panicker)
+        }
+    }
+
+    #[async_trait]
+    impl PdfEngine for StubEngine {
+        async fn extract(&self, _: &Path) -> std::result::Result<String, EngineError> {
+            self.queue.lock().unwrap().remove(0)
+        }
+    }
+
+    fn write_dummy_pdf(dir: &Path) -> PathBuf {
+        let p = dir.join("dummy.pdf");
+        std::fs::write(&p, b"%PDF-1.4\n%dummy\n").unwrap();
+        p
+    }
+
+    fn engines_with(primary: Arc<dyn PdfEngine>, fallback: FallbackState) -> PdfEngines {
+        PdfEngines { primary, fallback }
+    }
+
+    #[tokio::test]
+    async fn cache_hit_short_circuits_both_engines() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join(".zotero-ft-cache"), "cached body\n").unwrap();
+        let pdf = write_dummy_pdf(dir.path());
+
+        let engines = engines_with(StubEngine::never(), FallbackState::Ready(StubEngine::never()));
+        let r = extract(&pdf, dir.path(), &engines).await.unwrap();
+
+        assert_eq!(r.source, PdfTextSource::ZoteroCache);
+        assert!(r.text.contains("cached body"));
+    }
+
+    #[tokio::test]
+    async fn primary_success_does_not_write_cache() {
+        let dir = TempDir::new().unwrap();
+        let pdf = write_dummy_pdf(dir.path());
+
+        let engines = engines_with(StubEngine::ok("primary text"), FallbackState::Ready(StubEngine::never()));
+        let r = extract(&pdf, dir.path(), &engines).await.unwrap();
+
+        assert_eq!(r.source, PdfTextSource::LiveExtract);
+        assert_eq!(r.text, "primary text");
+        assert!(!dir.path().join(".zotero-ft-cache").exists(), "cache must not be written on primary success");
+    }
+
+    #[tokio::test]
+    async fn fallback_success_writes_cache() {
+        let dir = TempDir::new().unwrap();
+        let pdf = write_dummy_pdf(dir.path());
+
+        let engines = engines_with(
+            StubEngine::fail("unhandled function type 4"),
+            FallbackState::Ready(StubEngine::ok("recovered text")),
+        );
+        let r = extract(&pdf, dir.path(), &engines).await.unwrap();
+
+        assert_eq!(r.source, PdfTextSource::PdftotextFallback);
+        assert_eq!(r.text, "recovered text");
+        let cached = std::fs::read_to_string(dir.path().join(".zotero-ft-cache")).unwrap();
+        assert!(cached.contains("recovered text"));
+        assert!(cached.ends_with('\n'));
+    }
+
+    #[tokio::test]
+    async fn both_engines_failed_returns_composite_error() {
+        let dir = TempDir::new().unwrap();
+        let pdf = write_dummy_pdf(dir.path());
+
+        let engines = engines_with(
+            StubEngine::fail("primary boom"),
+            FallbackState::Ready(StubEngine::fail("pdftotext boom")),
+        );
+        let err = extract(&pdf, dir.path(), &engines).await.unwrap_err();
+
+        match err {
+            Error::PdfAllEnginesFailed { pdf_extract, pdftotext } => {
+                assert_eq!(pdf_extract, "primary boom");
+                assert_eq!(pdftotext, "pdftotext boom");
+            }
+            other => panic!("unexpected error variant: {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn fallback_binary_missing_returns_pdftotext_missing() {
+        let dir = TempDir::new().unwrap();
+        let pdf = write_dummy_pdf(dir.path());
+
+        let engines = engines_with(StubEngine::fail("primary"), FallbackState::BinaryMissing);
+        let err = extract(&pdf, dir.path(), &engines).await.unwrap_err();
+        assert!(matches!(err, Error::PdftotextMissing));
+    }
+
+    #[tokio::test]
+    async fn fallback_disabled_returns_legacy_pdf_error() {
+        let dir = TempDir::new().unwrap();
+        let pdf = write_dummy_pdf(dir.path());
+
+        let engines = engines_with(StubEngine::fail("primary"), FallbackState::Disabled);
+        let err = extract(&pdf, dir.path(), &engines).await.unwrap_err();
+        match err {
+            Error::Pdf(msg) => assert_eq!(msg, "primary"),
+            other => panic!("expected Error::Pdf, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn fallback_timeout_maps_to_pdftotext_timeout_variant() {
+        let dir = TempDir::new().unwrap();
+        let pdf = write_dummy_pdf(dir.path());
+
+        let engines = engines_with(
+            StubEngine::fail("primary"),
+            FallbackState::Ready(StubEngine::timeout(42)),
+        );
+        let err = extract(&pdf, dir.path(), &engines).await.unwrap_err();
+        match err {
+            Error::PdftotextTimeout(secs, _) => assert_eq!(secs, 42),
+            other => panic!("expected PdftotextTimeout, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn cache_write_failure_does_not_propagate() {
+        // Use a directory path that doesn't exist so the rename inside
+        // write_cache_atomic fails — text should still be returned.
+        let dir = TempDir::new().unwrap();
+        let nonexistent = dir.path().join("missing_subdir");
+        let pdf = write_dummy_pdf(dir.path());
+
+        let engines = engines_with(
+            StubEngine::fail("primary"),
+            FallbackState::Ready(StubEngine::ok("rescued")),
+        );
+        let r = extract(&pdf, &nonexistent, &engines).await.unwrap();
+        assert_eq!(r.source, PdfTextSource::PdftotextFallback);
+        assert_eq!(r.text, "rescued");
+        assert!(!nonexistent.join(".zotero-ft-cache").exists());
+    }
+}
