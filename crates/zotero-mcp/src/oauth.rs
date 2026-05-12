@@ -334,6 +334,10 @@ struct TokenResponse {
     access_token: String,
     token_type: &'static str,
     expires_in: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    refresh_token: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    refresh_expires_in: Option<u64>,
     scope: &'static str,
 }
 
@@ -396,7 +400,7 @@ async fn handle_client_credentials(
         expires_in = ttl,
         "OAuth token minted"
     );
-    token_ok(token, ttl)
+    token_ok_access_only(token, ttl)
 }
 
 async fn handle_authorization_code(
@@ -454,23 +458,39 @@ async fn handle_authorization_code(
             return server_error();
         }
     };
-    let token = pair.access_token;
-    let ttl = pair.access_ttl.as_secs();
     tracing::info!(
         grant = "authorization_code",
-        expires_in = ttl,
-        "OAuth token minted"
+        chain_id = %pair.chain_id,
+        expires_in = pair.access_ttl.as_secs(),
+        "OAuth token pair minted"
     );
-    token_ok(token, ttl)
+    token_ok_pair(pair)
 }
 
-fn token_ok(token: String, ttl: u64) -> axum::response::Response {
+fn token_ok_access_only(token: String, ttl: u64) -> axum::response::Response {
     (
         StatusCode::OK,
         Json(TokenResponse {
             access_token: token,
             token_type: "Bearer",
             expires_in: ttl,
+            refresh_token: None,
+            refresh_expires_in: None,
+            scope: "mcp",
+        }),
+    )
+        .into_response()
+}
+
+fn token_ok_pair(pair: MintedPair) -> axum::response::Response {
+    (
+        StatusCode::OK,
+        Json(TokenResponse {
+            access_token: pair.access_token,
+            token_type: "Bearer",
+            expires_in: pair.access_ttl.as_secs(),
+            refresh_token: Some(pair.refresh_token),
+            refresh_expires_in: Some(pair.refresh_ttl.as_secs()),
             scope: "mcp",
         }),
     )
@@ -1041,6 +1061,42 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         let body = body_string(resp).await;
         assert!(body.contains("invalid_grant"));
+    }
+
+    #[tokio::test]
+    async fn auth_code_response_includes_refresh_token() {
+        let state = test_state();
+        let verifier = "the-verifier-of-reasonable-length";
+        let challenge = challenge_for(verifier);
+        let auth_uri = format!(
+            "/authorize?response_type=code&client_id=test-id&redirect_uri=https%3A%2F%2Fclaude.ai%2Fapi%2Fmcp%2Fauth_callback&code_challenge={challenge}&code_challenge_method=S256&state=s",
+        );
+        let resp = router(state.clone())
+            .oneshot(Request::builder().uri(auth_uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let location = resp.headers().get(header::LOCATION).unwrap().to_str().unwrap().to_string();
+        let code = location.split_once("code=").and_then(|(_, r)| r.split('&').next()).unwrap().to_string();
+
+        let body = format!(
+            "grant_type=authorization_code&code={code}&redirect_uri=https%3A%2F%2Fclaude.ai%2Fapi%2Fmcp%2Fauth_callback&code_verifier={verifier}&client_id=test-id"
+        );
+        let resp = router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/oauth/token")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        assert!(body.contains("\"access_token\""), "body was: {body}");
+        assert!(body.contains("\"refresh_token\""), "body was: {body}");
+        assert!(body.contains("\"refresh_expires_in\":7776000"), "body was: {body}");
     }
 
     #[tokio::test]
