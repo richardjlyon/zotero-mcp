@@ -23,6 +23,9 @@
 //! Both grant types — `authorization_code` and `client_credentials` — are
 //! supported. The latter is retained for headless scripting and tests.
 
+mod token_store;
+pub use token_store::{ChainId, RefreshError, TokenStore};
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
