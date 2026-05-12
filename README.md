@@ -163,6 +163,50 @@ The HTTP mode is macOS-only out of the box because the bootstrapping uses
 launchd; manual setup for Linux/Windows is in
 [`docs/CLAUDE_COWORK_SETUP.md`](docs/CLAUDE_COWORK_SETUP.md).
 
+### OAuth configuration
+
+The HTTP transport is driven by two environment variables (the `zotero-mcp
+setup` command writes them into a launchd plist for you; manual deployments
+set them in whatever init system you use):
+
+| Env var | Meaning |
+|---------|---------|
+| `ZOTERO_MCP_HTTP` | Bind address for the HTTP/SSE listener, e.g. `127.0.0.1:8765`. When set, the server runs in HTTP mode instead of stdio. |
+| `ZOTERO_MCP_OAUTH_ISSUER` | Public URL the OAuth surface advertises in discovery and 401 challenges — e.g. `https://laptop.tailnet.ts.net`. Must match what Claude.ai believes the canonical URI is. When set and `oauth.toml` is missing, the server generates a fresh credential pair on first start. When unset and no `oauth.toml` exists, OAuth is disabled (the HTTP server runs without an auth gate; security then comes from the transport — e.g. a private Funnel URL). |
+
+Generated credentials persist at:
+
+- macOS: `~/Library/Application Support/dev.zotero-mcp.zotero-mcp/oauth.toml`
+- Linux: `~/.config/zotero-mcp/oauth.toml`
+
+…with mode `0600` so the secret never lands in a world-readable location.
+The file is plain TOML:
+
+```toml
+client_id = "zotero-mcp-<8-hex>"
+client_secret = "<32-hex>"
+issuer = "https://laptop.tailnet.ts.net"
+```
+
+The OAuth flow itself follows the spec: `authorization_code` with PKCE
+(SHA-256, base64url, no pad), discovery via
+`/.well-known/oauth-protected-resource` and
+`/.well-known/oauth-authorization-server`, 401 challenges per RFC 9728.
+Access tokens are opaque 32-byte hex strings with a 1-hour TTL;
+authorization codes have a 5-minute TTL and are single-use. Both stores are
+**in-memory only** — restarting `zotero-mcp` invalidates every token and
+clients re-acquire on the next 401.
+
+**Redirect URI allowlist** is hardcoded to `https://claude.ai/api/mcp/*`
+and `https://claude.com/api/mcp/*`. If you're integrating with a different
+MCP client, you'll need to add its origin to `ALLOWED_REDIRECT_URI_PREFIXES`
+in `crates/zotero-mcp/src/oauth.rs` and rebuild.
+
+**To rotate credentials**: delete `oauth.toml` and restart the server
+(`launchctl bootout … && launchctl bootstrap …`, or `zotero-mcp setup`
+again). A fresh pair is generated on first start; re-paste the new
+credentials into Claude.ai's connector config.
+
 ## Use it
 
 ### Claude Desktop / Claude Code (stdio)
@@ -412,6 +456,21 @@ Connectors → Add custom*. The connector flow is the only way in.
 Funnel is a one-time admin toggle on your tailnet. Enable it at
 <https://login.tailscale.com/admin/settings/features>, then re-run
 `zotero-mcp setup`.
+
+**I want to rotate / revoke OAuth credentials**
+Delete `<config_dir>/oauth.toml` and restart the server (`launchctl
+bootout && launchctl bootstrap …`, or simpler: re-run `zotero-mcp
+setup`). The server generates a fresh `client_id` / `client_secret`
+on next start. Re-paste the new pair into Claude.ai's connector config
+— the old credentials stop working immediately.
+
+**OAuth seems disabled — server accepts unauthenticated requests on the
+public URL**
+`ZOTERO_MCP_OAUTH_ISSUER` is unset and no `oauth.toml` exists. In that
+state, OAuth is off by design and security relies on the transport (a
+private Funnel URL, a VPN, etc.). Run `zotero-mcp setup` to bootstrap
+the OAuth gate, or set `ZOTERO_MCP_OAUTH_ISSUER` in your daemon's
+environment and restart.
 
 **Library writes succeed via the API but the desktop client can't see
 the file**
