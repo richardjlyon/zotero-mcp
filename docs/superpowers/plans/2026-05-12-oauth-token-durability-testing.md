@@ -19,22 +19,25 @@ Run all of this once at the start. If any step fails, stop and investigate befor
 
 ### P.1 — Verify you're on the right commit
 
+The final OAuth implementation commit is `a7376d3`. HEAD may be newer if doc commits have been added on top.
+
 - [ ] **Action:**
   ```bash
   cd /Users/rjl/Code/github/zotero-connector
-  git log --oneline -1
+  git log --oneline a7376d3..HEAD
   ```
-- [ ] **Expected:** `a7376d3 fix(oauth): handle tokens.json IO errors gracefully + clean up log/error strings` (or a newer commit if you've added more).
-- [ ] **Fail:** if you're on an older commit, the test results below won't match. `git checkout main && git pull` first.
+- [ ] **Expected:** either no output (you're exactly on `a7376d3`), or a list containing only `docs(…)` commits like the testing-plan commit (`docs(test): add comprehensive manual verification plan`).
+- [ ] **Fail:** if you see any `feat(…)`, `fix(…)`, `refactor(…)` commits in that list, source code has changed since the verification baseline was set — note them; verification may not cover them.
 
 ### P.2 — Verify the test suite passes locally
 
 - [ ] **Action:**
   ```bash
-  cargo test --package zotero-mcp 2>&1 | tail -20
+  cargo test --package zotero-mcp 2>&1 | grep "test result"
   ```
-- [ ] **Expected:** `test result: ok. 79 passed; 0 failed; …` for the lib tests and `ok` for each integration binary.
-- [ ] **Fail:** if any test fails, do NOT proceed — fix it first. Even one failure means the build is broken.
+- [ ] **Expected:** every line starts with `test result: ok.` and ends with `0 failed; …`. There will be ~30 lines (one per test binary — lib tests + each integration file + doc tests). Don't worry about counts per binary — what matters is that NO line says `FAILED` or any non-zero `failed` count.
+- [ ] **Quick fail-fast variant:** `cargo test --package zotero-mcp 2>&1 | grep -E "FAILED|^error" && echo "FAIL" || echo "PASS"` — should print `PASS`.
+- [ ] **Fail:** if any line says `failed: N` with N > 0, or if you see `FAILED` anywhere, STOP. Do NOT proceed — fix the failing test first.
 
 ### P.3 — Optional safe patch bumps
 
@@ -43,9 +46,9 @@ This is the option-3 patch upgrade for `generic-array` and `matchit`. Skip if yo
 - [ ] **Action (optional):**
   ```bash
   cargo update -p generic-array -p matchit
-  cargo test --package zotero-mcp 2>&1 | tail -5
+  cargo test --package zotero-mcp 2>&1 | grep -E "FAILED|^error" && echo "FAIL" || echo "PASS"
   ```
-- [ ] **Expected:** `Cargo.lock` updated; test suite still passes.
+- [ ] **Expected:** `Cargo.lock` updated; second command prints `PASS`.
 - [ ] **Fail:** revert with `git checkout Cargo.lock` and proceed without the patch bumps.
 - [ ] **If applied:** `git diff Cargo.lock` should show only `generic-array` and `matchit` lines changing. Commit if you want them included in this round.
 
