@@ -208,6 +208,14 @@ impl ZoteroServer {
         att::attach_link_t(&self.state, args).await
     }
 
+    #[tool(description = "Attach a local file to a Zotero parent item. Two storage modes: \"imported_file\" (bytes uploaded to Zotero's cloud and downloaded locally on each device — Zotero's default) or \"linked_file\" (Zotero stores only a path reference; the file lives wherever you put it — useful for BYO-storage setups like Resilio/Syncthing). Default mode comes from cfg.zotero.attachment_mode; per-call override allowed. For linked_file, the file must be under cfg.zotero.linked_attachment_base_dir. Input: { parent_key, file_path (absolute), mode?, filename?, content_type? }. Returns { attachment_key }.")]
+    pub async fn attach_file(
+        &self,
+        #[tool(aggr)] args: att::AttachFileArgs,
+    ) -> Result<CallToolResult, McpError> {
+        att::attach_file_t(&self.state, args).await
+    }
+
     #[tool(description = "Find items with weak metadata (missing DOI/abstract, stub titles).")]
     pub async fn find_weak_metadata_items(&self, #[tool(aggr)] args: WeakArgs) -> Result<CallToolResult, McpError> {
         en::find_weak_metadata_items_t(&self.state, args).await

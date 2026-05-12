@@ -8,7 +8,8 @@ use crate::core::pdf::{get_pdf_first_pages, get_pdf_text};
 use crate::core::reader::annotations::list_annotations;
 use crate::core::reader::attachments::{list_attachments, resolve_path};
 use crate::core::web::{get_webpage_content, refetch_url, WebMode};
-use crate::core::writer::attachments::attach_link;
+use crate::core::writer::attachments::{attach_file, attach_link, AttachFileOptions, AttachmentMode};
+use std::path::PathBuf;
 use crate::core::writer::items::create_item;
 use serde_json::Value;
 
@@ -157,6 +158,46 @@ pub struct AttachLinkArgs {
 
 pub async fn attach_link_t(s: &AppState, a: AttachLinkArgs) -> Result<CallToolResult, Error> {
     let key = attach_link(&s.api, &a.parent_key, &a.url, a.title.as_deref())
+        .await
+        .map_err(map_err)?;
+    Ok(CallToolResult::success(vec![Content::json(serde_json::json!({
+        "attachment_key": key,
+    }))?]))
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct AttachFileArgs {
+    pub parent_key: String,
+    /// Absolute path to a local file.
+    pub file_path: String,
+    /// Override the config-default attachment mode. "imported_file" uploads
+    /// bytes to Zotero cloud storage; "linked_file" stores a path reference
+    /// (BYO storage). Omit to use cfg.zotero.attachment_mode.
+    #[serde(default)]
+    pub mode: Option<String>,
+    #[serde(default)]
+    pub filename: Option<String>,
+    #[serde(default)]
+    pub content_type: Option<String>,
+}
+
+pub async fn attach_file_t(s: &AppState, a: AttachFileArgs) -> Result<CallToolResult, Error> {
+    let cfg = &s.cfg.zotero;
+    let mode_str = a.mode.as_deref().unwrap_or(&cfg.attachment_mode);
+    let mode = AttachmentMode::from_config(mode_str);
+    let opts = AttachFileOptions {
+        mode,
+        linked_attachment_base_dir: cfg
+            .linked_attachment_base_dir
+            .as_deref()
+            .map(crate::core::config::expand_tilde)
+            .map(PathBuf::from),
+        max_attachment_bytes: cfg.max_attachment_bytes,
+        filename: a.filename,
+        content_type: a.content_type,
+    };
+    let path = PathBuf::from(crate::core::config::expand_tilde(&a.file_path));
+    let key = attach_file(&s.api, &a.parent_key, &path, &opts)
         .await
         .map_err(map_err)?;
     Ok(CallToolResult::success(vec![Content::json(serde_json::json!({
