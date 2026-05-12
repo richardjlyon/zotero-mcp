@@ -36,6 +36,25 @@ You also need:
   Writes have to go through `api.zotero.org` because the local server
   returns 501 on `PATCH`/`POST`.
 
+- **Poppler's `pdftotext`** (optional, recommended): a small set of PDFs
+  use features the pure-Rust `pdf-extract` crate doesn't handle (e.g.
+  PostScript Calculator functions). When `pdftotext` is on `PATH`,
+  `zotero-mcp` automatically falls back to it and caches the recovered
+  text alongside Zotero's own full-text index. Install with:
+
+  ```bash
+  brew install poppler          # macOS
+  sudo apt install poppler-utils  # Debian/Ubuntu
+  ```
+
+  Or set an explicit path in `config.toml`:
+
+  ```toml
+  [zotero]
+  pdftotext_path = "/opt/homebrew/bin/pdftotext"
+  pdftotext_fallback = true   # default; set false to disable
+  ```
+
 ## Use it
 
 ### Claude Desktop / Claude Code (stdio)
