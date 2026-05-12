@@ -327,6 +327,8 @@ struct TokenRequest {
     #[allow(dead_code)]
     #[serde(default)]
     scope: Option<String>,
+    #[serde(default)]
+    refresh_token: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -356,6 +358,7 @@ async fn token_handler(
     match body.grant_type.as_str() {
         "authorization_code" => handle_authorization_code(state, headers, body).await,
         "client_credentials" => handle_client_credentials(state, headers, body).await,
+        "refresh_token" => handle_refresh_token(state, headers, body).await,
         _ => (
             StatusCode::BAD_REQUEST,
             Json(OAuthError {
@@ -463,6 +466,56 @@ async fn handle_authorization_code(
         chain_id = %pair.chain_id,
         expires_in = pair.access_ttl.as_secs(),
         "OAuth token pair minted"
+    );
+    token_ok_pair(pair)
+}
+
+async fn handle_refresh_token(
+    state: OAuthState,
+    headers: HeaderMap,
+    body: TokenRequest,
+) -> axum::response::Response {
+    // Optional client authentication — same logic as handle_authorization_code.
+    if let Some((client_id, client_secret)) = resolve_client_credentials(&headers, &body) {
+        let expected = &state.inner.config;
+        if !constant_time_eq(client_id.as_bytes(), expected.client_id.as_bytes())
+            || !constant_time_eq(client_secret.as_bytes(), expected.client_secret.as_bytes())
+        {
+            return invalid_client();
+        }
+    } else if let Some(client_id) = body.client_id.as_deref() {
+        if !constant_time_eq(client_id.as_bytes(), state.inner.config.client_id.as_bytes()) {
+            return invalid_client();
+        }
+    }
+
+    let Some(presented) = body.refresh_token.as_deref() else {
+        return invalid_grant("missing refresh_token");
+    };
+
+    let chain_id = match state.inner.tokens.consume_refresh(presented).await {
+        Ok(chain) => chain,
+        Err(RefreshError::Replayed(chain)) => {
+            tracing::warn!(chain_id = %chain, "refresh-token replay detected; revoking chain");
+            state.inner.tokens.revoke_chain(chain).await;
+            return invalid_grant("refresh token replay");
+        }
+        Err(RefreshError::Expired) => return invalid_grant("refresh token expired"),
+        Err(RefreshError::Unknown) => return invalid_grant("unknown refresh token"),
+    };
+
+    let pair = match state.inner.tokens.mint_pair(Some(chain_id.clone())).await {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::error!(error = %e, "mint_pair failed during refresh_token grant");
+            return server_error();
+        }
+    };
+    tracing::info!(
+        grant = "refresh_token",
+        chain_id = %chain_id,
+        expires_in = pair.access_ttl.as_secs(),
+        "OAuth token pair minted (refreshed)"
     );
     token_ok_pair(pair)
 }
@@ -1097,6 +1150,105 @@ mod tests {
         assert!(body.contains("\"access_token\""), "body was: {body}");
         assert!(body.contains("\"refresh_token\""), "body was: {body}");
         assert!(body.contains("\"refresh_expires_in\":7776000"), "body was: {body}");
+    }
+
+    async fn auth_code_full_flow(state: OAuthState) -> (String, String) {
+        let verifier = "verifier-string-of-decent-length";
+        let challenge = challenge_for(verifier);
+        let auth_uri = format!(
+            "/authorize?response_type=code&client_id=test-id&redirect_uri=https%3A%2F%2Fclaude.ai%2Fapi%2Fmcp%2Fauth_callback&code_challenge={challenge}&code_challenge_method=S256&state=s",
+        );
+        let resp = router(state.clone())
+            .oneshot(Request::builder().uri(auth_uri).body(Body::empty()).unwrap())
+            .await.unwrap();
+        let location = resp.headers().get(header::LOCATION).unwrap().to_str().unwrap().to_string();
+        let code = location.split_once("code=").and_then(|(_, r)| r.split('&').next()).unwrap().to_string();
+        let body = format!(
+            "grant_type=authorization_code&code={code}&redirect_uri=https%3A%2F%2Fclaude.ai%2Fapi%2Fmcp%2Fauth_callback&code_verifier={verifier}&client_id=test-id"
+        );
+        let resp = router(state).oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/oauth/token")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(body)).unwrap(),
+        ).await.unwrap();
+        let body_str = body_string(resp).await;
+        let parsed: serde_json::Value = serde_json::from_str(&body_str).unwrap();
+        let access = parsed["access_token"].as_str().unwrap().to_string();
+        let refresh = parsed["refresh_token"].as_str().unwrap().to_string();
+        (access, refresh)
+    }
+
+    async fn post_token(state: OAuthState, body: &str) -> axum::response::Response {
+        router(state).oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/oauth/token")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(body.to_string())).unwrap(),
+        ).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn refresh_token_grant_returns_new_access_and_refresh() {
+        let state = test_state();
+        let (orig_access, refresh) = auth_code_full_flow(state.clone()).await;
+        let resp = post_token(
+            state.clone(),
+            &format!("grant_type=refresh_token&refresh_token={refresh}&client_id=test-id"),
+        ).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let new_access = parsed["access_token"].as_str().unwrap();
+        let new_refresh = parsed["refresh_token"].as_str().unwrap();
+        assert_ne!(new_access, orig_access);
+        assert_ne!(new_refresh, refresh);
+        assert!(state.validate_token(new_access).await);
+    }
+
+    #[tokio::test]
+    async fn refresh_token_grant_invalidates_old_refresh_token() {
+        let state = test_state();
+        let (_, refresh) = auth_code_full_flow(state.clone()).await;
+        // First use OK
+        let r1 = post_token(state.clone(),
+            &format!("grant_type=refresh_token&refresh_token={refresh}&client_id=test-id")).await;
+        assert_eq!(r1.status(), StatusCode::OK);
+        // Second use of same refresh token must fail
+        let r2 = post_token(state,
+            &format!("grant_type=refresh_token&refresh_token={refresh}&client_id=test-id")).await;
+        assert_eq!(r2.status(), StatusCode::BAD_REQUEST);
+        let body = body_string(r2).await;
+        assert!(body.contains("invalid_grant"));
+    }
+
+    #[tokio::test]
+    async fn refresh_token_replay_revokes_chain() {
+        let state = test_state();
+        let (orig_access, refresh) = auth_code_full_flow(state.clone()).await;
+        let r1 = post_token(state.clone(),
+            &format!("grant_type=refresh_token&refresh_token={refresh}&client_id=test-id")).await;
+        let body = body_string(r1).await;
+        let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let new_access = parsed["access_token"].as_str().unwrap().to_string();
+        // Replay original refresh — must revoke chain.
+        let _ = post_token(state.clone(),
+            &format!("grant_type=refresh_token&refresh_token={refresh}&client_id=test-id")).await;
+        // Both the new access AND the original access must now be invalid.
+        assert!(!state.validate_token(&new_access).await, "new access should be revoked after replay");
+        assert!(!state.validate_token(&orig_access).await, "original access should be revoked after replay");
+    }
+
+    #[tokio::test]
+    async fn refresh_token_grant_with_unknown_token_returns_invalid_grant() {
+        let state = test_state();
+        let resp = post_token(state,
+            "grant_type=refresh_token&refresh_token=never-issued&client_id=test-id").await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = body_string(resp).await;
+        assert!(body.contains("invalid_grant"));
     }
 
     #[tokio::test]
