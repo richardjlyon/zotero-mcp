@@ -247,6 +247,41 @@ impl TokenStore {
         true
     }
 
+    /// Consume a refresh token. Returns the chain_id on success.
+    ///
+    /// Returns `Replayed { chain_id }` if the token was already consumed —
+    /// this is a leak signal and the caller MUST follow up with
+    /// `revoke_chain(chain_id)`. Returns `Unknown` for a refresh token in an
+    /// already-revoked chain (we don't disclose chain identity to a caller
+    /// who doesn't already know it).
+    pub async fn consume_refresh(&self, raw: &str) -> Result<ChainId, RefreshError> {
+        let hash = sha256_hex(raw);
+        let mut idx = self.inner.state.write().await;
+        let now = unix_now();
+
+        // Inspect first (immutable borrow only) — we need to drop this borrow
+        // before the second get_mut so the borrow checker is happy with the
+        // subsequent self.persist_locked(&idx) call.
+        let (chain_id, expires_at, consumed_at) = match idx.refresh_by_hash.get(&hash) {
+            Some(r) => (r.chain_id.clone(), r.expires_at, r.consumed_at),
+            None => return Err(RefreshError::Unknown),
+        };
+        if idx.revoked.contains(&chain_id) {
+            return Err(RefreshError::Unknown);
+        }
+        if expires_at <= now {
+            return Err(RefreshError::Expired);
+        }
+        if consumed_at.is_some() {
+            return Err(RefreshError::Replayed(chain_id));
+        }
+
+        // Mutate (fresh mutable borrow now that the read borrow is gone).
+        idx.refresh_by_hash.get_mut(&hash).unwrap().consumed_at = Some(now);
+        self.persist_locked(&idx);
+        Ok(chain_id)
+    }
+
     /// Serialize the current index back to a Snapshot and atomically write
     /// the file (temp + rename). On failure, log and continue.
     fn persist_locked(&self, idx: &Index) {
@@ -519,5 +554,51 @@ mod tests {
         // Sleep 1s so unix-second resolution lapses past expires_at.
         tokio::time::sleep(Duration::from_secs(1)).await;
         assert!(!store.validate_access(&pair.access_token).await);
+    }
+
+    #[tokio::test]
+    async fn consume_refresh_returns_chain_id_on_first_use() {
+        let dir = TempDir::new().unwrap();
+        let store = fresh(&dir);
+        let pair = store.mint_pair(None).await.unwrap();
+        let chain = store.consume_refresh(&pair.refresh_token).await.unwrap();
+        assert_eq!(chain, pair.chain_id);
+    }
+
+    #[tokio::test]
+    async fn consume_refresh_replay_returns_replayed_with_chain_id() {
+        let dir = TempDir::new().unwrap();
+        let store = fresh(&dir);
+        let pair = store.mint_pair(None).await.unwrap();
+        let _first = store.consume_refresh(&pair.refresh_token).await.unwrap();
+        let err = store.consume_refresh(&pair.refresh_token).await.unwrap_err();
+        match err {
+            RefreshError::Replayed(chain) => assert_eq!(chain, pair.chain_id),
+            other => panic!("expected Replayed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn consume_refresh_unknown_returns_unknown() {
+        let dir = TempDir::new().unwrap();
+        let store = fresh(&dir);
+        let err = store.consume_refresh("never-issued").await.unwrap_err();
+        assert!(matches!(err, RefreshError::Unknown), "got {err:?}");
+    }
+
+    #[tokio::test]
+    async fn consume_refresh_expired_returns_expired() {
+        let dir = TempDir::new().unwrap();
+        let store = TokenStore::load(
+            dir.path().join("tokens.json"),
+            "client-id-1",
+            Duration::from_secs(60),
+            Duration::from_secs(0),    // refresh expires immediately
+        )
+        .unwrap();
+        let pair = store.mint_pair(None).await.unwrap();
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let err = store.consume_refresh(&pair.refresh_token).await.unwrap_err();
+        assert!(matches!(err, RefreshError::Expired), "got {err:?}");
     }
 }
