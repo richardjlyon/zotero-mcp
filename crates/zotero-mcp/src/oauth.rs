@@ -52,6 +52,9 @@ const ALLOWED_REDIRECT_URI_PREFIXES: &[&str] = &[
     "https://claude.com/api/mcp/",
 ];
 
+pub const DEFAULT_ACCESS_TOKEN_TTL_SECS: u64 = 7 * 24 * 3600;   // 7 days
+pub const DEFAULT_REFRESH_TOKEN_TTL_SECS: u64 = 90 * 24 * 3600; // 90 days
+
 /// Pre-shared OAuth client credentials. Persisted at
 /// `<config_dir>/oauth.toml` with mode 0600 so the secret never lands in a
 /// world-readable location.
@@ -63,6 +66,23 @@ pub struct OAuthConfig {
     /// metadata URL in 401 challenges. Must match what the client believes the
     /// canonical URI is (e.g. the Tailscale Funnel hostname).
     pub issuer: String,
+    #[serde(default)]
+    pub access_token_ttl_secs: Option<u64>,
+    #[serde(default)]
+    pub refresh_token_ttl_secs: Option<u64>,
+}
+
+impl OAuthConfig {
+    pub fn effective_access_ttl(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(
+            self.access_token_ttl_secs.unwrap_or(DEFAULT_ACCESS_TOKEN_TTL_SECS),
+        )
+    }
+    pub fn effective_refresh_ttl(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(
+            self.refresh_token_ttl_secs.unwrap_or(DEFAULT_REFRESH_TOKEN_TTL_SECS),
+        )
+    }
 }
 
 /// Location of the on-disk OAuth config. Uses the same ProjectDirs convention
@@ -110,6 +130,8 @@ impl OAuthConfig {
             client_id: format!("zotero-mcp-{}", short_id()),
             client_secret: format!("{:032x}", rand::random::<u128>()),
             issuer,
+            access_token_ttl_secs: None,
+            refresh_token_ttl_secs: None,
         };
         Self::write_secure(&path, &config)?;
         tracing::warn!(
@@ -605,6 +627,34 @@ mod tests {
     use tower::ServiceExt;
 
     #[test]
+    fn config_loads_with_default_ttls_when_unset() {
+        let toml_str = r#"
+            client_id = "x"
+            client_secret = "y"
+            issuer = "https://example.test"
+        "#;
+        let cfg: OAuthConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.access_token_ttl_secs, None);
+        assert_eq!(cfg.refresh_token_ttl_secs, None);
+        assert_eq!(cfg.effective_access_ttl().as_secs(), 7 * 24 * 3600);
+        assert_eq!(cfg.effective_refresh_ttl().as_secs(), 90 * 24 * 3600);
+    }
+
+    #[test]
+    fn config_loads_with_explicit_ttls() {
+        let toml_str = r#"
+            client_id = "x"
+            client_secret = "y"
+            issuer = "https://example.test"
+            access_token_ttl_secs = 3600
+            refresh_token_ttl_secs = 86400
+        "#;
+        let cfg: OAuthConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.effective_access_ttl().as_secs(), 3600);
+        assert_eq!(cfg.effective_refresh_ttl().as_secs(), 86400);
+    }
+
+    #[test]
     fn config_roundtrips_through_disk_with_secure_perms() {
         let dir = tempdir();
         let path = dir.join("oauth.toml");
@@ -612,6 +662,8 @@ mod tests {
             client_id: "id-x".into(),
             client_secret: "secret-y".into(),
             issuer: "https://example.test".into(),
+            access_token_ttl_secs: None,
+            refresh_token_ttl_secs: None,
         };
         OAuthConfig::write_secure(&path, &original).unwrap();
 
@@ -643,6 +695,8 @@ mod tests {
             client_id: "test-id".into(),
             client_secret: "test-secret".into(),
             issuer: "https://example.test".into(),
+            access_token_ttl_secs: None,
+            refresh_token_ttl_secs: None,
         })
     }
 

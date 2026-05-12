@@ -240,6 +240,8 @@ mod tests {
             client_id: "test-id".into(),
             client_secret: "test-secret".into(),
             issuer: "https://example.test".into(),
+            access_token_ttl_secs: None,
+            refresh_token_ttl_secs: None,
         })
     }
 
