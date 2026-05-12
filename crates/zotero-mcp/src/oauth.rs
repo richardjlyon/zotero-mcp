@@ -43,7 +43,6 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::sync::RwLock;
 
-const TOKEN_TTL_SECS: u64 = 3600;
 const AUTH_CODE_TTL_SECS: u64 = 300;
 
 /// Redirect URIs we'll accept on the authorization endpoint. The OAuth 2.1
@@ -185,13 +184,10 @@ pub struct OAuthState {
 
 struct Inner {
     config: OAuthConfig,
-    /// In-memory access-token store. Tokens are opaque 32-byte hex strings;
-    /// values are unix expiry timestamps. Restarts invalidate every token —
-    /// clients re-acquire on the next 401.
-    tokens: RwLock<HashMap<String, u64>>,
-    /// In-memory authorization-code store, keyed by code. Codes are
-    /// single-use — `take_auth_code` removes on lookup.
+    /// In-memory authorization-code store. Codes are single-use, 5-minute TTL —
+    /// surviving a server restart is not a goal for this short-lived state.
     codes: RwLock<HashMap<String, AuthCode>>,
+    tokens: TokenStore,
 }
 
 #[derive(Clone)]
@@ -202,14 +198,31 @@ struct AuthCode {
 }
 
 impl OAuthState {
-    pub fn new(config: OAuthConfig) -> Self {
-        Self {
+    /// Construct an OAuthState backed by a TokenStore at `tokens_path`.
+    /// Use `OAuthState::with_tokens_path` to supply the path explicitly,
+    /// or `OAuthState::from_default_path` to derive it from the standard
+    /// ProjectDirs location (test code uses the former, production uses the latter).
+    pub fn with_tokens_path(config: OAuthConfig, tokens_path: PathBuf) -> anyhow::Result<Self> {
+        let access_ttl = config.effective_access_ttl();
+        let refresh_ttl = config.effective_refresh_ttl();
+        let tokens = TokenStore::load(tokens_path, &config.client_id, access_ttl, refresh_ttl)?;
+        Ok(Self {
             inner: Arc::new(Inner {
                 config,
-                tokens: RwLock::new(HashMap::new()),
                 codes: RwLock::new(HashMap::new()),
+                tokens,
             }),
-        }
+        })
+    }
+
+    /// Standard production constructor: derive the tokens path from the
+    /// same ProjectDirs base used by `oauth.toml`.
+    pub fn from_default_path(config: OAuthConfig) -> anyhow::Result<Self> {
+        let dir = directories::ProjectDirs::from("dev", "zotero-mcp", "zotero-mcp")
+            .ok_or_else(|| anyhow::anyhow!("could not resolve ProjectDirs for tokens.json"))?
+            .config_dir()
+            .to_path_buf();
+        Self::with_tokens_path(config, dir.join("tokens.json"))
     }
 
     pub fn issuer(&self) -> &str {
@@ -227,20 +240,14 @@ impl OAuthState {
 
     /// Returns true iff the token was previously issued and is not expired.
     pub async fn validate_token(&self, token: &str) -> bool {
-        let now = unix_now();
-        let map = self.inner.tokens.read().await;
-        map.get(token).is_some_and(|exp| *exp > now)
+        self.inner.tokens.validate_access(token).await
     }
 
-    pub(crate) async fn mint_token(&self) -> (String, u64) {
-        let token = format!("{:032x}", rand::random::<u128>());
-        let exp = unix_now() + TOKEN_TTL_SECS;
-        self.inner
-            .tokens
-            .write()
-            .await
-            .insert(token.clone(), exp);
-        (token, TOKEN_TTL_SECS)
+    /// Crate-internal access to the token store — used by tests in sibling
+    /// modules that need to mint a token without going through the HTTP layer.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn token_store(&self) -> &TokenStore {
+        &self.inner.tokens
     }
 }
 
@@ -374,7 +381,15 @@ async fn handle_client_credentials(
         return invalid_client();
     }
 
-    let (token, ttl) = state.mint_token().await;
+    let pair = match state.inner.tokens.mint_pair(None).await {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::error!(error = %e, "mint_pair failed for client_credentials");
+            return invalid_client();
+        }
+    };
+    let token = pair.access_token;
+    let ttl = pair.access_ttl.as_secs();
     tracing::info!(
         client_id = %client_id,
         grant = "client_credentials",
@@ -432,7 +447,15 @@ async fn handle_authorization_code(
         return invalid_grant("PKCE verification failed");
     }
 
-    let (token, ttl) = state.mint_token().await;
+    let pair = match state.inner.tokens.mint_pair(None).await {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::error!(error = %e, "mint_pair failed for authorization_code");
+            return invalid_client();
+        }
+    };
+    let token = pair.access_token;
+    let ttl = pair.access_ttl.as_secs();
     tracing::info!(
         grant = "authorization_code",
         expires_in = ttl,
@@ -694,13 +717,18 @@ mod tests {
     }
 
     fn test_state() -> OAuthState {
-        OAuthState::new(OAuthConfig {
-            client_id: "test-id".into(),
-            client_secret: "test-secret".into(),
-            issuer: "https://example.test".into(),
-            access_token_ttl_secs: None,
-            refresh_token_ttl_secs: None,
-        })
+        let dir = tempdir();
+        OAuthState::with_tokens_path(
+            OAuthConfig {
+                client_id: "test-id".into(),
+                client_secret: "test-secret".into(),
+                issuer: "https://example.test".into(),
+                access_token_ttl_secs: None,
+                refresh_token_ttl_secs: None,
+            },
+            dir.join("tokens.json"),
+        )
+        .unwrap()
     }
 
     async fn body_string(resp: axum::response::Response) -> String {
@@ -728,7 +756,7 @@ mod tests {
         let body = body_string(resp).await;
         assert!(body.contains("\"access_token\""), "body was: {body}");
         assert!(body.contains("\"token_type\":\"Bearer\""));
-        assert!(body.contains("\"expires_in\":3600"));
+        assert!(body.contains("\"expires_in\":604800"));
     }
 
     #[tokio::test]
@@ -795,8 +823,8 @@ mod tests {
     #[tokio::test]
     async fn minted_token_validates_then_expires() {
         let state = test_state();
-        let (token, _ttl) = state.mint_token().await;
-        assert!(state.validate_token(&token).await);
+        let pair = state.inner.tokens.mint_pair(None).await.unwrap();
+        assert!(state.validate_token(&pair.access_token).await);
         assert!(!state.validate_token("not-issued").await);
     }
 

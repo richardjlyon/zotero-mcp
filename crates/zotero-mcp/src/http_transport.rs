@@ -236,13 +236,22 @@ mod tests {
     use tower::ServiceExt;
 
     fn test_oauth_state() -> OAuthState {
-        OAuthState::new(OAuthConfig {
-            client_id: "test-id".into(),
-            client_secret: "test-secret".into(),
-            issuer: "https://example.test".into(),
-            access_token_ttl_secs: None,
-            refresh_token_ttl_secs: None,
-        })
+        let dir = std::env::temp_dir().join(format!(
+            "zotero-mcp-http-test-{}",
+            rand::random::<u64>()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        OAuthState::with_tokens_path(
+            OAuthConfig {
+                client_id: "test-id".into(),
+                client_secret: "test-secret".into(),
+                issuer: "https://example.test".into(),
+                access_token_ttl_secs: None,
+                refresh_token_ttl_secs: None,
+            },
+            dir.join("tokens.json"),
+        )
+        .unwrap()
     }
 
     /// Build a router that mirrors the bearer-gated portion of `run`, without
@@ -298,7 +307,8 @@ mod tests {
     #[tokio::test]
     async fn minted_bearer_passes_through() {
         let oauth_state = test_oauth_state();
-        let (token, _ttl) = oauth_state.mint_token().await;
+        let pair = oauth_state.token_store().mint_pair(None).await.unwrap();
+        let token = pair.access_token;
         let app = protected_router(oauth_state);
         let resp = app
             .oneshot(

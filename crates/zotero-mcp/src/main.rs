@@ -65,8 +65,10 @@ async fn run_server() -> anyhow::Result<()> {
         // disabled — the server runs without an auth gate, as before.
         let issuer_hint =
             std::env::var("ZOTERO_MCP_OAUTH_ISSUER").ok().filter(|s| !s.is_empty());
-        let oauth_state = oauth::OAuthConfig::load_or_generate(issuer_hint)?
-            .map(oauth::OAuthState::new);
+        let oauth_state = match oauth::OAuthConfig::load_or_generate(issuer_hint)? {
+            Some(cfg) => Some(oauth::OAuthState::from_default_path(cfg)?),
+            None => None,
+        };
         let addr: SocketAddr = bind
             .parse()
             .map_err(|e| anyhow::anyhow!("ZOTERO_MCP_HTTP must be host:port, got {bind:?}: {e}"))?;
