@@ -29,3 +29,21 @@ pub(crate) fn openlibrary_like_split(full: &str) -> (Option<String>, Option<Stri
         _ => (None, None),
     }
 }
+
+/// Flatten a `NormalizedRecord` into a Zotero-shaped item JSON suitable for
+/// `core::writer::items::create_item`. Caller supplies `item_type` because
+/// enrichment sources don't always identify it.
+pub fn normalized_to_item(record: &NormalizedRecord, item_type: &str) -> Value {
+    let mut obj = record.fields.clone();
+    obj.insert("itemType".into(), Value::String(item_type.into()));
+    let creators: Vec<Value> = record
+        .creators
+        .iter()
+        .map(|c| serde_json::to_value(c).unwrap_or(Value::Null))
+        .filter(|v| !v.is_null())
+        .collect();
+    if !creators.is_empty() {
+        obj.insert("creators".into(), Value::Array(creators));
+    }
+    Value::Object(obj)
+}
