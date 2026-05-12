@@ -39,5 +39,19 @@ def make_hello() -> None:
     print(f"Wrote {out} ({out.stat().st_size} bytes)")
 
 
+# Note: make_type4 attempted to synthesize a minimal PDF that triggers
+# pdf-extract's "unhandled function type 4" panic. Hand-authored fixtures
+# do not reliably reproduce the panic — the real-world trigger appears to
+# require a font CMap path that's difficult to synthesize. Coverage of
+# this case is provided by:
+# - Orchestrator unit tests (core::pdf::orchestrator_tests) with stub engines.
+# - Direct repro against the offending PDF at smoke-test time.
+#
+# Approach tried: Type 3 font whose glyph CharProc invokes an axial shading
+# whose /Function is a Type 4 PostScript-calculator stream. pdf-extract
+# processed the file without error (returned Ok("\nA")), so the panic path
+# was not reached via shading — it requires a deeper font-CMap decode route.
+
+
 if __name__ == "__main__":
     make_hello()
