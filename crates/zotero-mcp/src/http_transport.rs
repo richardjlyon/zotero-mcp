@@ -6,11 +6,11 @@
 //! `/mcp` route only — OAuth discovery and `/oauth/token` stay
 //! unauthenticated so clients can complete the handshake.
 //!
-//! Transport-config knobs are exposed as env vars (see spec Decision 2):
-//!   - `ZOTERO_MCP_TRANSPORT_STATEFUL` (bool, default `true`)
-//!   - `ZOTERO_MCP_TRANSPORT_JSON`     (bool, default `false`)
-//!   - `ZOTERO_MCP_ALLOWED_HOSTS`      (comma-separated, default unset — uses
-//!     rmcp's loopback-only default)
+//! Transport config is fixed at stateful_mode=true, json_response=false —
+//! validated against Claude Cowork during the Slice E rollout. The only
+//! runtime knob is `ZOTERO_MCP_ALLOWED_HOSTS` (comma-separated, default
+//! unset = disable Host check), exposed so a future hardening pass can
+//! tighten DNS-rebinding protection without recompiling.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -26,13 +26,6 @@ use tower_http::validate_request::ValidateRequestHeaderLayer;
 use crate::oauth::{self, OAuthState};
 use crate::server::ZoteroServer;
 use crate::state::AppState;
-
-fn env_bool(name: &str, default: bool) -> bool {
-    std::env::var(name)
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(default)
-}
 
 fn env_allowed_hosts() -> Option<Vec<String>> {
     std::env::var("ZOTERO_MCP_ALLOWED_HOSTS").ok().map(|s| {
@@ -50,20 +43,15 @@ pub async fn run(
     bearer: Option<String>,
     oauth_state: Option<OAuthState>,
 ) -> anyhow::Result<()> {
-    let stateful_mode = env_bool("ZOTERO_MCP_TRANSPORT_STATEFUL", true);
-    let json_response = env_bool("ZOTERO_MCP_TRANSPORT_JSON", false);
-    let allowed_hosts_override = env_allowed_hosts();
-
     let mut config = StreamableHttpServerConfig::default()
         .with_sse_keep_alive(Some(Duration::from_secs(5)))
-        .with_stateful_mode(stateful_mode)
-        .with_json_response(json_response);
-    match allowed_hosts_override {
+        .with_stateful_mode(true)
+        .with_json_response(false);
+    match env_allowed_hosts() {
         Some(hosts) => config = config.with_allowed_hosts(hosts),
         // rmcp's default is loopback-only (localhost/127.0.0.1/::1), which
-        // would reject Cloudflare-tunnel-fronted requests. The spec wants
-        // unset = preserve prior behaviour (no Host check); rmcp exposes
-        // this directly as disable_allowed_hosts.
+        // would reject tunnel-fronted requests. Unset = no Host check;
+        // rmcp exposes this directly via disable_allowed_hosts.
         None => config = config.disable_allowed_hosts(),
     }
 
@@ -97,15 +85,11 @@ pub async fn run(
         app = app.layer(auth);
         tracing::info!(
             %addr,
-            stateful_mode,
-            json_response,
             "zotero-mcp streamable-HTTP transport listening (static bearer auth enabled)"
         );
     } else {
         tracing::warn!(
             %addr,
-            stateful_mode,
-            json_response,
             "zotero-mcp streamable-HTTP transport listening WITHOUT static bearer — \
              OAuth gates /mcp if configured; otherwise transport-level access control applies"
         );
