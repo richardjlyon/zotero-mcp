@@ -221,17 +221,23 @@ impl ZoteroServer {
         en::find_weak_metadata_items_t(&self.state, args).await
     }
 
-    #[tool(description = "Look up a DOI via CrossRef and return Zotero-shaped metadata.")]
+    #[tool(description = "Look up a DOI via CrossRef. \
+                          `format='zotero'` (default) returns a flat Zotero item ready to pass straight to `create_item`; \
+                          `format='candidate'` returns an envelope `{source, fields, creators, source_url}` for use with `propose_metadata_update` and `enrich_item`.")]
     pub async fn lookup_doi(&self, #[tool(aggr)] args: DoiArgs) -> Result<CallToolResult, McpError> {
         en::lookup_doi_t(&self.state, args).await
     }
 
-    #[tool(description = "Look up an ISBN via OpenLibrary and return Zotero-shaped metadata.")]
+    #[tool(description = "Look up an ISBN via OpenLibrary. \
+                          `format='zotero'` (default) returns a flat Zotero item ready to pass straight to `create_item`; \
+                          `format='candidate'` returns an envelope `{source, fields, creators, source_url}` for use with `propose_metadata_update` and `enrich_item`.")]
     pub async fn lookup_isbn(&self, #[tool(aggr)] args: IsbnArgs) -> Result<CallToolResult, McpError> {
         en::lookup_isbn_t(&self.state, args).await
     }
 
-    #[tool(description = "Look up an arXiv preprint by ID and return Zotero-shaped metadata.")]
+    #[tool(description = "Look up an arXiv preprint by ID. \
+                          `format='zotero'` (default) returns a flat Zotero item ready to pass straight to `create_item`; \
+                          `format='candidate'` returns an envelope `{source, fields, creators, source_url}` for use with `propose_metadata_update` and `enrich_item`.")]
     pub async fn lookup_arxiv(&self, #[tool(aggr)] args: ArxivArgs) -> Result<CallToolResult, McpError> {
         en::lookup_arxiv_t(&self.state, args).await
     }
@@ -246,7 +252,9 @@ impl ZoteroServer {
         en::search_semantic_scholar_t(&self.state, args).await
     }
 
-    #[tool(description = "Score candidate metadata and produce an EnrichmentProposal (does not apply).")]
+    #[tool(description = "Score candidate metadata and produce an EnrichmentProposal (does not apply). \
+                          Candidates must be lookup results obtained with `format='candidate'`. \
+                          Items obtained with the default `format='zotero'` will fail validation because the scoring logic requires the envelope's `source` field.")]
     pub async fn propose_metadata_update(&self, #[tool(aggr)] args: ProposeArgs) -> Result<CallToolResult, McpError> {
         en::propose_metadata_update_t(&self.state, args).await
     }
@@ -256,7 +264,9 @@ impl ZoteroServer {
         en::apply_metadata_update_t(&self.state, args).await
     }
 
-    #[tool(description = "Compose propose+apply: only auto-applies when confidence >= threshold AND multi-source agreement.")]
+    #[tool(description = "Compose propose+apply: only auto-applies when confidence >= threshold AND multi-source agreement. \
+                          Candidates must be lookup results obtained with `format='candidate'`. \
+                          Items obtained with the default `format='zotero'` will fail validation because the scoring logic requires the envelope's `source` field.")]
     pub async fn enrich_item(&self, #[tool(aggr)] args: EnrichArgs) -> Result<CallToolResult, McpError> {
         en::enrich_item_t(&self.state, args).await
     }
