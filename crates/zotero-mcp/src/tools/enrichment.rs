@@ -18,6 +18,10 @@ fn invalid(msg: String) -> Error {
     Error::invalid_params(msg, None)
 }
 
+fn default_format() -> String {
+    "zotero".into()
+}
+
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 pub struct WeakArgs {
     #[serde(default = "fifty")]
@@ -42,37 +46,51 @@ pub async fn find_weak_metadata_items_t(
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 pub struct DoiArgs {
     pub doi: String,
+    #[serde(default = "default_format")]
+    pub format: String,
+}
+
+fn render_record(record: &NormalizedRecord, format: &str) -> Result<Value, Error> {
+    match format {
+        "zotero" => Ok(crate::core::enrichment::normalized_to_item(record)),
+        "candidate" => Ok(serde_json::to_value(record).unwrap()),
+        other => Err(invalid(format!(
+            "format must be 'zotero' or 'candidate' (got '{}')",
+            other
+        ))),
+    }
 }
 
 pub async fn lookup_doi_t(s: &AppState, a: DoiArgs) -> Result<CallToolResult, Error> {
     let r = s.crossref.lookup_doi(&a.doi).await.map_err(map_err)?;
-    Ok(CallToolResult::success(vec![Content::json(
-        serde_json::to_value(&r).unwrap(),
-    )?]))
+    let body = render_record(&r, &a.format)?;
+    Ok(CallToolResult::success(vec![Content::json(body)?]))
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 pub struct IsbnArgs {
     pub isbn: String,
+    #[serde(default = "default_format")]
+    pub format: String,
 }
 
 pub async fn lookup_isbn_t(s: &AppState, a: IsbnArgs) -> Result<CallToolResult, Error> {
     let r = s.openlibrary.lookup_isbn(&a.isbn).await.map_err(map_err)?;
-    Ok(CallToolResult::success(vec![Content::json(
-        serde_json::to_value(&r).unwrap(),
-    )?]))
+    let body = render_record(&r, &a.format)?;
+    Ok(CallToolResult::success(vec![Content::json(body)?]))
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 pub struct ArxivArgs {
     pub id: String,
+    #[serde(default = "default_format")]
+    pub format: String,
 }
 
 pub async fn lookup_arxiv_t(s: &AppState, a: ArxivArgs) -> Result<CallToolResult, Error> {
     let r = s.arxiv.lookup_arxiv(&a.id).await.map_err(map_err)?;
-    Ok(CallToolResult::success(vec![Content::json(
-        serde_json::to_value(&r).unwrap(),
-    )?]))
+    let body = render_record(&r, &a.format)?;
+    Ok(CallToolResult::success(vec![Content::json(body)?]))
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
@@ -201,4 +219,58 @@ pub async fn enrich_item_t(s: &AppState, a: EnrichArgs) -> Result<CallToolResult
     Ok(CallToolResult::success(vec![Content::json(
         serde_json::to_value(&p).unwrap(),
     )?]))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::types::Creator;
+    use serde_json::{Map, Value};
+
+    fn sample_record() -> NormalizedRecord {
+        let mut fields = Map::new();
+        fields.insert("itemType".into(), Value::String("book".into()));
+        fields.insert("title".into(), Value::String("X".into()));
+        NormalizedRecord {
+            source: "openlibrary".into(),
+            fields,
+            creators: vec![Creator {
+                first_name: Some("Jane".into()),
+                last_name: Some("Doe".into()),
+                creator_type: "author".into(),
+                order_index: 0,
+            }],
+            source_url: Some("https://example.test/x".into()),
+        }
+    }
+
+    #[test]
+    fn render_record_zotero_returns_flat_shape() {
+        let r = sample_record();
+        let v = render_record(&r, "zotero").unwrap();
+        let obj = v.as_object().unwrap();
+        assert_eq!(obj["itemType"], "book");
+        assert_eq!(obj["title"], "X");
+        assert!(!obj.contains_key("source"));
+        assert!(!obj.contains_key("fields"));
+        let extra = obj["extra"].as_str().unwrap();
+        assert!(extra.contains("source: openlibrary"));
+    }
+
+    #[test]
+    fn render_record_candidate_returns_envelope() {
+        let r = sample_record();
+        let v = render_record(&r, "candidate").unwrap();
+        assert_eq!(v["source"], "openlibrary");
+        assert_eq!(v["fields"]["itemType"], "book");
+        assert_eq!(v["fields"]["title"], "X");
+        assert!(v["creators"].is_array());
+    }
+
+    #[test]
+    fn render_record_unknown_format_errors() {
+        let r = sample_record();
+        let err = render_record(&r, "garbage").unwrap_err();
+        assert!(err.to_string().contains("format must be"), "got: {err}");
+    }
 }
