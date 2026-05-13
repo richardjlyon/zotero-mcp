@@ -96,6 +96,81 @@ impl OpenLibraryClient {
     }
 }
 
+const MONTHS: &[(&str, u32)] = &[
+    ("january", 1), ("jan", 1),
+    ("february", 2), ("feb", 2),
+    ("march", 3), ("mar", 3),
+    ("april", 4), ("apr", 4),
+    ("may", 5),
+    ("june", 6), ("jun", 6),
+    ("july", 7), ("jul", 7),
+    ("august", 8), ("aug", 8),
+    ("september", 9), ("sept", 9), ("sep", 9),
+    ("october", 10), ("oct", 10),
+    ("november", 11), ("nov", 11),
+    ("december", 12), ("dec", 12),
+];
+
+/// Parse OpenLibrary's freeform `publish_date` into ISO 8601 (YYYY-MM-DD,
+/// YYYY-MM, or YYYY). Returns the trimmed input unchanged if the string
+/// doesn't cleanly match a known pattern — never drops information.
+pub(crate) fn parse_date(s: &str) -> String {
+    let trimmed = s.trim();
+    if is_iso_date(trimmed) {
+        return trimmed.to_string();
+    }
+
+    let cleaned = trimmed.to_lowercase().replace(',', " ");
+    let tokens: Vec<&str> = cleaned.split_whitespace().collect();
+
+    let mut month: Option<u32> = None;
+    let mut day: Option<u32> = None;
+    let mut year: Option<u32> = None;
+    let mut unrecognised = 0;
+
+    for tok in &tokens {
+        if let Some((_, m)) = MONTHS.iter().find(|(name, _)| *name == *tok) {
+            if month.is_none() {
+                month = Some(*m);
+            }
+        } else if let Ok(n) = tok.parse::<u32>() {
+            if (1000..=9999).contains(&n) {
+                year = Some(n);
+            } else if (1..=31).contains(&n) {
+                day = Some(n);
+            } else {
+                unrecognised += 1;
+            }
+        } else {
+            unrecognised += 1;
+        }
+    }
+
+    if unrecognised > 0 {
+        return trimmed.to_string();
+    }
+
+    match (year, month, day) {
+        (Some(y), Some(m), Some(d)) => format!("{:04}-{:02}-{:02}", y, m, d),
+        (Some(y), Some(m), None) => format!("{:04}-{:02}", y, m),
+        (Some(y), None, None) => format!("{:04}", y),
+        _ => trimmed.to_string(),
+    }
+}
+
+fn is_iso_date(s: &str) -> bool {
+    let parts: Vec<&str> = s.split('-').collect();
+    if parts.iter().any(|p| !p.chars().all(|c| c.is_ascii_digit())) {
+        return false;
+    }
+    match parts.as_slice() {
+        [y] if y.len() == 4 => true,
+        [y, m] if y.len() == 4 && m.len() == 2 => true,
+        [y, m, d] if y.len() == 4 && m.len() == 2 && d.len() == 2 => true,
+        _ => false,
+    }
+}
+
 fn split_name(full: &str) -> (Option<String>, Option<String>) {
     // Naive: last token is surname; everything before is first.
     let parts: Vec<&str> = full.trim().rsplitn(2, ' ').collect();
@@ -103,5 +178,60 @@ fn split_name(full: &str) -> (Option<String>, Option<String>) {
         [last, first] => (Some((*first).to_string()), Some((*last).to_string())),
         [single] => (None, Some((*single).to_string())),
         _ => (None, None),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_date;
+
+    #[test]
+    fn parse_date_iso_year_passes_through() {
+        assert_eq!(parse_date("2020"), "2020");
+    }
+
+    #[test]
+    fn parse_date_iso_year_month_passes_through() {
+        assert_eq!(parse_date("2020-05"), "2020-05");
+    }
+
+    #[test]
+    fn parse_date_iso_full_passes_through() {
+        assert_eq!(parse_date("1998-09-08"), "1998-09-08");
+    }
+
+    #[test]
+    fn parse_date_long_month_day_year() {
+        assert_eq!(parse_date("March 5, 2020"), "2020-03-05");
+    }
+
+    #[test]
+    fn parse_date_short_month_day_year() {
+        assert_eq!(parse_date("Mar 5, 2020"), "2020-03-05");
+    }
+
+    #[test]
+    fn parse_date_day_long_month_year() {
+        assert_eq!(parse_date("5 March 2020"), "2020-03-05");
+    }
+
+    #[test]
+    fn parse_date_long_month_year() {
+        assert_eq!(parse_date("March 2020"), "2020-03");
+    }
+
+    #[test]
+    fn parse_date_short_month_year() {
+        assert_eq!(parse_date("Mar 2020"), "2020-03");
+    }
+
+    #[test]
+    fn parse_date_unparseable_passes_through() {
+        assert_eq!(parse_date("sometime in 2020"), "sometime in 2020");
+    }
+
+    #[test]
+    fn parse_date_trims_whitespace() {
+        assert_eq!(parse_date("  2020  "), "2020");
     }
 }
