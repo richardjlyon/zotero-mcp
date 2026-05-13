@@ -32,9 +32,14 @@ impl ZoteroServer {
         Self { state }
     }
 
-    #[tool(description = "Liveness check; returns 'pong'.")]
+    #[tool(description = "Liveness check; returns 'pong (v<version>, <git-sha>)' so callers can confirm which build is responding.")]
     pub async fn ping(&self) -> Result<CallToolResult, McpError> {
-        Ok(CallToolResult::success(vec![Content::text("pong")]))
+        let msg = format!(
+            "pong (v{}, {})",
+            env!("CARGO_PKG_VERSION"),
+            env!("ZOTERO_MCP_GIT_SHA"),
+        );
+        Ok(CallToolResult::success(vec![Content::text(msg)]))
     }
 
     #[tool(description = "Search the local Zotero library (metadata + optional fulltext).")]
