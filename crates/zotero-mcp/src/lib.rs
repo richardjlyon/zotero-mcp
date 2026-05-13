@@ -5,7 +5,7 @@
 //! integration test suite — and any future Rust caller — can reach the
 //! pieces that drive the server: the low-level Zotero readers/writers
 //! (`core`), the MCP service implementation (`server`, `tools`,
-//! `resources`), the HTTP/SSE transport (`http_transport`), and the
+//! `resources`), the streamable-HTTP transport (`http_transport`), and the
 //! OAuth 2.1 surface (`oauth`).
 
 pub mod bearer;

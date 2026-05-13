@@ -1,7 +1,7 @@
 # zotero-mcp
 
 A local-first MCP server that gives Claude fast, safe access to your Zotero
-library — over stdio (Claude Desktop, Claude Code) or HTTP/SSE with OAuth 2.1
+library — over stdio (Claude Desktop, Claude Code) or HTTP with OAuth 2.1
 (Claude.ai web, Claude Cowork).
 
 Browse your collections, search by tag, read PDF text and annotations, look
@@ -130,7 +130,7 @@ Code spawn `zotero-mcp` as a subprocess and talk to it over stdin/stdout
 using the MCP protocol. No network, no daemon, no auth gate. Wire it
 in once via `claude_desktop_config.json` and forget about it.
 
-**HTTP/SSE with OAuth 2.1** is what Claude.ai and Claude Cowork require.
+**HTTP with OAuth 2.1** is what Claude.ai and Claude Cowork require.
 The Cowork sandbox runs in an isolated Linux VM that cannot launch local
 stdio subprocesses on your Mac, so the stdio config doesn't reach it.
 Instead, `zotero-mcp` runs as a long-lived launchd job that exposes an
@@ -138,9 +138,9 @@ HTTPS endpoint over **Tailscale Funnel**, gated by **OAuth 2.1
 (authorization_code + PKCE)**:
 
 ```
-Cowork sandbox  →  https://<your-host>.<tailnet>.ts.net/sse   (HTTPS, Tailscale Funnel)
+Cowork sandbox  →  https://<your-host>.<tailnet>.ts.net/mcp   (HTTPS, Tailscale Funnel)
                 →  http://127.0.0.1:8765                       (loopback, on your Mac)
-                →  zotero-mcp                                  (HTTP/SSE transport)
+                →  zotero-mcp                                  (streamable-HTTP transport, per MCP 2025-06-18)
                 →  http://localhost:23119                      (Zotero local API)
 ```
 
@@ -171,7 +171,7 @@ set them in whatever init system you use):
 
 | Env var | Meaning |
 |---------|---------|
-| `ZOTERO_MCP_HTTP` | Bind address for the HTTP/SSE listener, e.g. `127.0.0.1:8765`. When set, the server runs in HTTP mode instead of stdio. |
+| `ZOTERO_MCP_HTTP` | Bind address for the HTTP listener, e.g. `127.0.0.1:8765`. When set, the server runs in HTTP mode instead of stdio. |
 | `ZOTERO_MCP_OAUTH_ISSUER` | Public URL the OAuth surface advertises in discovery and 401 challenges — e.g. `https://laptop.tailnet.ts.net`. Must match what Claude.ai believes the canonical URI is. When set and `oauth.toml` is missing, the server generates a fresh credential pair on first start. When unset and no `oauth.toml` exists, OAuth is disabled (the HTTP server runs without an auth gate; security then comes from the transport — e.g. a private Funnel URL). |
 
 Generated credentials persist at:
@@ -254,7 +254,7 @@ Wire it into Claude Desktop's `claude_desktop_config.json`:
 
 For Claude Code: see [`docs/CLAUDE_CODE_SETUP.md`](docs/CLAUDE_CODE_SETUP.md).
 
-### Claude.ai / Claude Cowork (HTTP/SSE + OAuth 2.1)
+### Claude.ai / Claude Cowork (HTTP + OAuth 2.1)
 
 ```bash
 zotero-mcp setup
@@ -267,7 +267,7 @@ credentials, and prints a paste-ready block:
 ```
 === Paste these into Claude.ai → Settings → Connectors → Add custom ===
 
-  Server URL          https://<host>.<tailnet>.ts.net/sse
+  Server URL          https://<host>.<tailnet>.ts.net/mcp
   Advanced ▸ Client ID     zotero-mcp-<8-hex>
   Advanced ▸ Client Secret <32-hex>
 ```
@@ -488,7 +488,7 @@ You set `attachment_mode = "linked_file"` and tried to attach a file
 that isn't under `linked_attachment_base_dir`. Either move the file
 in, or pass `mode = "imported_file"` for that specific call.
 
-**HTTP/SSE mode: 401 from the public URL after `zotero-mcp setup`**
+**HTTP mode: 401 from the public URL after `zotero-mcp setup`**
 That's the OAuth gate working as intended. Use the paste-ready block
 from `zotero-mcp show-credentials` in *Claude.ai → Settings →
 Connectors → Add custom*. The connector flow is the only way in.
@@ -531,9 +531,18 @@ After upgrading:
 
 - **Stdio mode**: nothing else to do — Claude Desktop/Code will spawn
   the new binary on next launch.
-- **HTTP/SSE mode**: re-run `zotero-mcp setup` if the launchd plist is
+- **HTTP mode**: re-run `zotero-mcp setup` if the launchd plist is
   older than the new binary (the plist references the install path).
   `zotero-mcp status` will flag a mismatch.
+- **Upgrading from `0.2.x`**: v0.3.0 replaced the legacy SSE transport
+  (`GET /sse` + `POST /message`) with the new streamable-HTTP transport
+  per MCP 2025-06-18 (`POST /mcp`). If you have an existing Claude.ai /
+  Cowork connector pointing at `…/sse`, you must add a new connector
+  whose URL ends in `/mcp` (Cowork currently has no UI to edit an
+  existing connector's URL — see
+  [anthropics/claude-ai-mcp#73](https://github.com/anthropics/claude-ai-mcp/issues/73)).
+  The new connector reuses the same `client_id` / `client_secret`, so
+  `zotero-mcp show-credentials` still applies.
 
 If your Zotero library is outside the supported schema window
 (`min_schema_userdata`/`max_schema_userdata`) after an update, the server

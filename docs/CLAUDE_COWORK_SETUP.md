@@ -3,14 +3,14 @@
 Cowork sessions run in an isolated Linux sandbox that cannot launch
 stdio subprocesses on your Mac, so the Claude-Desktop-style stdio
 config does not reach Cowork. Instead, `zotero-mcp` exposes an
-HTTP/SSE endpoint that the sandbox can reach as a "Custom connector".
+streamable-HTTP endpoint that the sandbox can reach as a "Custom connector".
 
 ## Architecture
 
 ```
-Cowork sandbox  →  https://<your-host>.<tailnet>.ts.net/sse  (HTTPS, Tailscale Funnel)
+Cowork sandbox  →  https://<your-host>.<tailnet>.ts.net/mcp  (HTTPS, Tailscale Funnel)
                 →  http://127.0.0.1:8765                      (loopback, on your Mac)
-                →  zotero-mcp                                 (HTTP/SSE transport)
+                →  zotero-mcp                                 (streamable-HTTP, MCP 2025-06-18)
 ```
 
 The Mac runs `zotero-mcp` in HTTP mode under `launchd`. Tailscale Funnel
@@ -44,7 +44,7 @@ to materialize `oauth.toml`, and prints a paste-ready credentials block:
 ```
 === Paste these into Claude.ai → Settings → Connectors → Add custom ===
 
-  Server URL          https://laptop.<tailnet>.ts.net/sse
+  Server URL          https://laptop.<tailnet>.ts.net/mcp
   Advanced ▸ Client ID     zotero-mcp-<8-hex>
   Advanced ▸ Client Secret <32-hex>
 ```
@@ -97,25 +97,25 @@ Verify discovery + 401 challenge:
 ```bash
 URL="https://laptop.<tailnet>.ts.net"
 curl -sS "$URL/.well-known/oauth-authorization-server" | jq .
-curl -sSi -m 5 "$URL/sse" | head -3
+curl -sSi -m 5 "$URL/mcp" | head -3
 ```
 
 The discovery doc should advertise `authorization_endpoint`,
 `token_endpoint`, and `code_challenge_methods_supported=["S256"]`.
-`/sse` should return `401 Unauthorized` with a
+`/mcp` should return `401 Unauthorized` with a
 `WWW-Authenticate: Bearer …, resource_metadata="…"` header.
 
 ## Add the connector in Claude.ai
 
 In Claude.ai → Settings → Connectors → "Add custom connector":
 
-- **Remote MCP server URL**: `https://laptop.<tailnet>.ts.net/sse`
+- **Remote MCP server URL**: `https://laptop.<tailnet>.ts.net/mcp`
 - **Advanced → OAuth Client ID**: paste `client_id` from `oauth.toml`
 - **Advanced → OAuth Client Secret**: paste `client_secret` from `oauth.toml`
 
 Claude.ai handles the rest:
 
-1. It hits `/sse`, sees `401` + `WWW-Authenticate: Bearer
+1. It hits `/mcp`, sees `401` + `WWW-Authenticate: Bearer
    resource_metadata="…"`.
 2. It fetches `/.well-known/oauth-protected-resource` and
    `/.well-known/oauth-authorization-server` to discover the endpoints.
@@ -125,7 +125,7 @@ Claude.ai handles the rest:
 5. Claude.ai posts to `/oauth/token` with the code + `code_verifier`.
    We verify `SHA256(verifier) == stored code_challenge` and mint a
    Bearer access token (default 7-day TTL; see Token lifecycle below).
-6. Claude.ai retries `/sse` with `Authorization: Bearer …` and the
+6. Claude.ai retries `/mcp` with `Authorization: Bearer …` and the
    Zotero tools start working.
 
 Restart Cowork sessions after first connect; the Zotero tools appear
@@ -194,17 +194,20 @@ Funnel** — the public URL becomes an open Zotero proxy.
 
 ## Troubleshooting
 
-- **401 Unauthorized on /sse with no `Authorization` header**: expected
+- **401 Unauthorized on /mcp with no `Authorization` header**: expected
   — that's the OAuth challenge. Claude.ai should follow up by hitting
   `/.well-known/oauth-protected-resource`. If it doesn't, check the
-  connector's Server URL field includes `/sse`.
+  connector's Server URL field ends with `/mcp` (NOT the older `/sse`
+  used in v0.2.x).
 - **Claude.ai shows "Server unreachable" / cached failure**: edit the
   connector and Save (no changes needed) to invalidate cached state and
   force a fresh OAuth handshake.
 - **Connection hangs with no events**: check
-  `~/Library/Logs/zotero-mcp/http.err.log`. The "SSE buffer flush"
-  padding handles most HTTP/2 proxy layers, but if you see no events
-  *at all* the upstream Zotero SQLite open may have failed at startup.
+  `~/Library/Logs/zotero-mcp/http.err.log`. If you see no `/mcp` POSTs
+  at all, the upstream Zotero SQLite open may have failed at startup.
+  If POSTs arrive but responses stall on an HTTP/2 proxy edge (e.g.
+  Cloudflare-like buffering), try setting `ZOTERO_MCP_TRANSPORT_JSON=true`
+  in your launchd plist — it skips SSE framing on the response side.
 - **Funnel says "Funnel is not enabled on your tailnet"**: visit
   `https://login.tailscale.com/admin/settings/features` and toggle it on.
 - **`invalid_grant` in logs after `/oauth/token`**: PKCE mismatch or

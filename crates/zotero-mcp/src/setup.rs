@@ -1,4 +1,4 @@
-//! Interactive setup for the HTTP/SSE + OAuth deployment.
+//! Interactive setup for the streamable-HTTP + OAuth deployment.
 //!
 //! The MCP server itself is just a long-running daemon; what makes it hard to
 //! install is the surrounding macOS plumbing — launchd plist, Tailscale Funnel,
@@ -331,7 +331,7 @@ fn read_oauth(path: &Path) -> anyhow::Result<oauth::OAuthConfig> {
 }
 
 fn print_credentials_block(creds: &oauth::OAuthConfig, issuer: &str) {
-    let url = format!("{issuer}/sse");
+    let url = format!("{issuer}/mcp");
     println!("\n=== Paste these into Claude.ai → Settings → Connectors → Add custom ===\n");
     println!("  Server URL          {url}");
     println!("  Advanced ▸ Client ID     {}", creds.client_id);

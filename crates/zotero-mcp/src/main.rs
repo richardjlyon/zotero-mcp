@@ -7,7 +7,7 @@ use zotero_mcp::{core as zcore, http_transport, logging, oauth, server, setup, s
 #[command(
     name = "zotero-mcp",
     about = "Local-first Zotero bridge: runs as an MCP server over stdio (default), \
-             HTTP/SSE (when ZOTERO_MCP_HTTP is set), or a setup helper for the HTTP \
+             HTTP (when ZOTERO_MCP_HTTP is set), or a setup helper for the HTTP \
              deployment."
 )]
 struct Cli {

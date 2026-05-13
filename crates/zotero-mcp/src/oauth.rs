@@ -1,4 +1,4 @@
-//! OAuth 2.1 authorization surface for the HTTP/SSE transport.
+//! OAuth 2.1 authorization surface for the streamable-HTTP transport.
 //!
 //! Claude.ai's MCP connector follows the spec-canonical flow: authorization
 //! code with PKCE (RFC 7636, S256). Even though the connector UI exposes
@@ -6,7 +6,7 @@
 //! `authorization_code` — the secret is just an additional bearer of trust on
 //! the token request. The flow we observed in practice:
 //!
-//!   1. Client (Anthropic backend) hits `/sse` without a token →
+//!   1. Client (Anthropic backend) hits `/mcp` without a token →
 //!      `401 Unauthorized` with a `WWW-Authenticate: Bearer
 //!      resource_metadata="…"` challenge (RFC 9728 §5.1).
 //!   2. Client fetches `/.well-known/oauth-protected-resource` and
