@@ -8,6 +8,7 @@
 //! `resources`), the HTTP/SSE transport (`http_transport`), and the
 //! OAuth 2.1 surface (`oauth`).
 
+pub mod bearer;
 pub mod core;
 pub mod http_transport;
 pub mod logging;
