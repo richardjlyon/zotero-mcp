@@ -20,7 +20,7 @@ impl OpenLibraryClient {
     pub async fn lookup_isbn(&self, isbn: &str) -> Result<NormalizedRecord> {
         let key = format!("openlibrary:isbn:{}", isbn);
         if let Some(v) = self.cache.get::<Value>(&key).await? {
-            return self.from_book_json(v).await;
+            return self.from_book_json(v, isbn).await;
         }
         let url = format!("{}/isbn/{}.json", self.base, isbn);
         let resp = self.http.get(&url).send().await?;
@@ -32,16 +32,16 @@ impl OpenLibraryClient {
         }
         let book: Value = resp.json().await?;
         self.cache.put(&key, &book).await.ok();
-        self.from_book_json(book).await
+        self.from_book_json(book, isbn).await
     }
 
-    async fn from_book_json(&self, book: Value) -> Result<NormalizedRecord> {
+    async fn from_book_json(&self, book: Value, isbn: &str) -> Result<NormalizedRecord> {
         let mut fields = Map::new();
         if let Some(t) = book.get("title").and_then(|x| x.as_str()) {
             fields.insert("title".into(), Value::String(t.into()));
         }
         if let Some(d) = book.get("publish_date").and_then(|x| x.as_str()) {
-            fields.insert("date".into(), Value::String(d.into()));
+            fields.insert("date".into(), Value::String(parse_date(d)));
         }
         if let Some(p) = book
             .get("publishers")
@@ -76,7 +76,7 @@ impl OpenLibraryClient {
             source: "openlibrary".into(),
             fields,
             creators,
-            source_url: Some(format!("{}{}", self.base, "/")),
+            source_url: Some(format!("{}/isbn/{}", self.base, isbn)),
         })
     }
 
