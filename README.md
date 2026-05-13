@@ -314,11 +314,16 @@ are paraphrased from each tool's `#[tool(description = …)]` declaration
 
 | Tool | What it does |
 |------|--------------|
-| `lookup_doi` | DOI → Zotero-shaped JSON via CrossRef |
-| `lookup_isbn` | ISBN → Zotero-shaped JSON via OpenLibrary |
-| `lookup_arxiv` | arXiv ID → Zotero-shaped JSON |
+| `lookup_doi` | DOI → flat Zotero-shaped JSON via CrossRef. `format="zotero"` (default) returns an item ready to pass straight to `create_item`; `format="candidate"` returns an envelope for use with `propose_metadata_update`/`enrich_item` |
+| `lookup_isbn` | ISBN → flat Zotero-shaped JSON via OpenLibrary (same `format` choice as above; freeform `publish_date` normalised to ISO 8601) |
+| `lookup_arxiv` | arXiv ID → flat Zotero-shaped JSON (same `format` choice as above) |
 | `search_crossref` | Free-text CrossRef search; normalized candidates |
 | `search_semantic_scholar` | Free-text Semantic Scholar search; normalized candidates |
+
+When emitted as flat Zotero items (the default), the lookup tools stash
+provenance in Zotero's `extra` field as newline-separated `key: value`
+lines (`source: openlibrary` / `sourceURL: …`) so the origin of each
+record survives into the library.
 
 ### Format
 
@@ -339,11 +344,16 @@ The split exists so that Claude (or you) can review a proposal before
 writes happen. `enrich_item` is the bulk-safe convenience: it will pass
 on items where confidence isn't high enough rather than guessing.
 
+`propose_metadata_update` and `enrich_item` require their `candidates`
+to be lookup results obtained with `format="candidate"` — they need
+the envelope's `source` field for scoring. Items obtained with the
+default `format="zotero"` will fail validation.
+
 ### Write
 
 | Tool | What it does |
 |------|--------------|
-| `create_item` | Create a new Zotero item from a JSON metadata object — compatible with the output of `lookup_doi` / `search_crossref` |
+| `create_item` | Create a new Zotero item from a JSON metadata object. The default-format output of `lookup_doi` / `lookup_isbn` / `lookup_arxiv` drops straight in with no transform |
 | `attach_file` | Attach a local file as a child of an item; supports `imported_file` (uploads bytes to Zotero cloud) and `linked_file` (path reference for BYO-storage setups like Resilio/Syncthing) |
 | `attach_link` | Attach a URL as a `linked_url` child (no bytes transfer) |
 | `add_note` | Markdown/HTML note attached to an item |
@@ -356,7 +366,7 @@ on items where confidence isn't high enough rather than guessing.
 
 | Tool | What it does |
 |------|--------------|
-| `ping` | Liveness check; returns `"pong"` |
+| `ping` | Liveness check; returns `"pong (v<version>, <git-sha>)"` so callers can confirm which build is responding |
 
 Run `zotero-mcp` in stdio mode with an MCP inspector to see the full
 schemas and argument types.
