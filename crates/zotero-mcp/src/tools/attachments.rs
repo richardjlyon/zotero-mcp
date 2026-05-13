@@ -11,7 +11,7 @@ use crate::core::web::{get_webpage_content, refetch_url, WebMode};
 use crate::core::writer::attachments::{attach_file, attach_link, AttachFileOptions, AttachmentMode};
 use std::path::PathBuf;
 use crate::core::writer::items::create_item;
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 pub struct ItemKeyArgs {
@@ -129,9 +129,11 @@ pub async fn refetch_url_t(s: &AppState, a: RefetchArgs) -> Result<CallToolResul
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 pub struct CreateItemArgs {
-    /// Zotero-shaped item JSON. Required: itemType (string). Everything else
-    /// pass-through to the Zotero Web API.
-    pub item: Value,
+    /// Zotero-shaped item JSON object. Required key: `itemType` (string).
+    /// Other keys pass through to the Zotero Web API. The output of
+    /// `lookup_doi`/`lookup_isbn`/`lookup_arxiv` with the default
+    /// `format='zotero'` is directly compatible.
+    pub item: Map<String, Value>,
     /// Optional collection keys to file the new item under. Equivalent to
     /// setting `collections` inside `item`; the two are unioned.
     #[serde(default)]
@@ -139,7 +141,8 @@ pub struct CreateItemArgs {
 }
 
 pub async fn create_item_t(s: &AppState, a: CreateItemArgs) -> Result<CallToolResult, Error> {
-    let (key, version) = create_item(&s.api, &a.item, &a.collection_keys)
+    let item_value = Value::Object(a.item);
+    let (key, version) = create_item(&s.api, &item_value, &a.collection_keys)
         .await
         .map_err(map_err)?;
     Ok(CallToolResult::success(vec![Content::json(serde_json::json!({

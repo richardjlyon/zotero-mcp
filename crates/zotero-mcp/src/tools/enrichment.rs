@@ -6,7 +6,7 @@ use rmcp::Error;
 use rmcp::model::{CallToolResult, Content};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
 use crate::core::enrichment::NormalizedRecord;
 use crate::core::enrichment::propose::{
     EnrichInput, ProposeInput, apply_metadata_update, enrich_item, find_weak_metadata_items,
@@ -131,15 +131,15 @@ pub async fn search_semantic_scholar_t(
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 pub struct ProposeArgs {
     pub item_key: String,
-    /// JSON array of NormalizedRecord objects.
-    pub candidates: Vec<Value>,
+    /// JSON array of NormalizedRecord objects (lookup_* output with format='candidate').
+    pub candidates: Vec<Map<String, Value>>,
 }
 
-fn parse_candidates(arr: Vec<Value>) -> Result<Vec<NormalizedRecord>, Error> {
+fn parse_candidates(arr: Vec<Map<String, Value>>) -> Result<Vec<NormalizedRecord>, Error> {
     arr.into_iter()
         .enumerate()
-        .map(|(i, v)| {
-            serde_json::from_value(v).map_err(|e| {
+        .map(|(i, m)| {
+            serde_json::from_value(Value::Object(m)).map_err(|e| {
                 invalid(format!("candidates[{}] invalid NormalizedRecord: {}", i, e))
             })
         })
@@ -191,7 +191,7 @@ pub async fn apply_metadata_update_t(
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 pub struct EnrichArgs {
     pub item_key: String,
-    pub candidates: Vec<Value>,
+    pub candidates: Vec<Map<String, Value>>,
     #[serde(default)]
     pub auto_apply_threshold: Option<f64>,
 }
