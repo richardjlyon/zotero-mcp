@@ -98,7 +98,7 @@ There is no test today that calls `lookup_*` and feeds its literal output into `
    - `CreateItemArgs.item: Value` → `serde_json::Map<String, Value>`
    - `ProposeArgs.candidates: Vec<Value>` → `Vec<serde_json::Map<String, Value>>`
    - `EnrichArgs.candidates: Vec<Value>` → `Vec<serde_json::Map<String, Value>>`
-6. **Test the round-trip end-to-end through an in-memory MCP transport.** Use `tokio::io::duplex()` paired with `rmcp::serve_server` and a client peer. Fall back to direct `ZoteroServer::call_tool(...)` invocations plus a separate `schema_shape.rs` test if the in-memory transport doesn't compose cleanly with rmcp 0.1.5.
+6. **Lock the schema fix in with a `schema_shape.rs` test.** Use `schemars::schema_for!` on the three args structs and assert the generated schemas declare `type: object` (or `type: array` with object items). This is the regression guard for Slice B; combined with the unit tests on `normalized_to_item` and the extended core-client tests in Slice A, it gives sufficient coverage without standing up an in-memory MCP transport. (Earlier drafts proposed a full MCP-wire roundtrip test through `tokio::io::duplex` + rmcp's serve loops; that was dropped as disproportionate test infrastructure for a fix this small. The skill author's end-to-end use of the running server is the real-world integration check.)
 
 ---
 
@@ -129,14 +129,10 @@ Three independent slices, in dependency order:
 │     Vec<Value> -> Vec<serde_json::Map<String, Value>>             │
 │   Downstream wrapping in create_item_t / parse_candidates         │
 │                                                                   │
-│ Slice C: End-to-end MCP roundtrip test                            │
-│   tests/lookup_to_create_roundtrip.rs (new)                       │
-│     - in-memory MCP transport pair                                │
-│     - mocked OpenLibrary / CrossRef / arXiv / Zotero Local API    │
-│     - for each of isbn/doi/arxiv: CallTool(lookup_*) then         │
-│       CallTool(create_item, item=<previous response>)             │
-│   tests/schema_shape.rs (new, also serves as fallback)            │
+│ Slice C: Schema-shape regression test                             │
+│   tests/schema_shape.rs (new)                                     │
 │     - asserts schemars-generated schemas have correct types       │
+│     - locks in Slice B against future regressions                 │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
@@ -252,60 +248,47 @@ No `#[schemars(...)]` attributes are used. The type system carries the schema co
 
 ---
 
-## Slice C: End-to-end MCP roundtrip test
+## Slice C: Schema-shape regression test
 
-### Primary plan: in-memory MCP transport pair
-
-New file `crates/zotero-mcp/tests/lookup_to_create_roundtrip.rs`. Test infrastructure:
+New file `crates/zotero-mcp/tests/schema_shape.rs`. Uses `schemars::schema_for!` on each of the three changed args structs and asserts the generated schemas advertise the right top-level types:
 
 ```rust
-async fn spawn_server_and_client() -> (ClientPeer, MockServer, MockServer, MockServer, MockServer)
-```
+use schemars::schema_for;
+use zotero_mcp::tools::attachments::CreateItemArgs;
+use zotero_mcp::tools::enrichment::{EnrichArgs, ProposeArgs};
 
-1. Start four `wiremock::MockServer` instances (OpenLibrary, CrossRef, arXiv, Zotero Local API).
-2. Build an `AppState` that points the enrichment clients and Local API at the mock URIs.
-3. Create paired streams with `tokio::io::duplex(64 * 1024)`.
-4. Spawn the server side: `rmcp::serve_server(ZoteroServer::new(state), server_half).await`.
-5. Spawn the client side: `rmcp::serve_client(...)` (or its equivalent in rmcp 0.1.5) on the client half, returning a client peer with `.call_tool(...)`.
-6. Return the client peer and the four mock servers so subtests can program responses and assert request bodies.
+#[test]
+fn create_item_args_item_is_object_typed() {
+    let schema = schema_for!(CreateItemArgs);
+    let json = serde_json::to_value(&schema).unwrap();
+    assert_eq!(json["properties"]["item"]["type"], "object");
+}
 
-Three subtests, each parameterising the lookup tool, fixture, and expected `itemType`:
+#[test]
+fn propose_args_candidates_is_array_of_objects() {
+    let schema = schema_for!(ProposeArgs);
+    let json = serde_json::to_value(&schema).unwrap();
+    assert_eq!(json["properties"]["candidates"]["type"], "array");
+    assert_eq!(json["properties"]["candidates"]["items"]["type"], "object");
+}
 
-```rust
-#[tokio::test]
-async fn lookup_isbn_to_create_item_roundtrip() {
-    // program OpenLibrary mock to return an ISBN fixture
-    // program Zotero mock to accept POST /items and return {successful:{0:{key,version}}}
-    let r1 = client.call_tool("lookup_isbn", json!({"isbn": "9780000000000"})).await?;
-    let item = extract_json_content(r1);
-    let r2 = client.call_tool("create_item", json!({"item": item})).await?;
-    // assert r2 has a key and version
-    // assert Zotero mock received a body where the first element has "itemType":"book"
+#[test]
+fn enrich_args_candidates_is_array_of_objects() {
+    let schema = schema_for!(EnrichArgs);
+    let json = serde_json::to_value(&schema).unwrap();
+    assert_eq!(json["properties"]["candidates"]["type"], "array");
+    assert_eq!(json["properties"]["candidates"]["items"]["type"], "object");
 }
 ```
 
-Same for `lookup_doi_to_create_item_roundtrip` and `lookup_arxiv_to_create_item_roundtrip`.
+### Why this, not a full MCP roundtrip
 
-What this catches that nothing else does: the JSON-RPC serialise→deserialise round trip. If a regression reintroduced the empty schema, the client side would (depending on which MCP client we're testing against) potentially stringify the `item` argument, and `create_item_t` would fail to deserialise into `Map<String, Value>`. The roundtrip is the only test that sees this layer.
+An earlier draft of this spec called for a `tokio::io::duplex` + `rmcp::serve_server` / `serve_client` roundtrip test that drove `lookup_* → create_item` over the JSON-RPC wire. That test would have caught the stringification bug class more directly — but at substantial cost:
 
-### Spike step before writing the three subtests
+- Building a real `AppState` in tests requires a SQLite fixture (`ReadOnlyPool::new` is async and needs an on-disk database), plus an `Arc<PdfEngines>`, plus seven other live deps.
+- rmcp 0.1.5 does not document an in-process server+client pattern; the library's own tests skip it. The test-infra work to wire it up could easily be larger than the entire feature.
 
-Before authoring the full test, write a one-liner that just calls `ping` over the in-memory transport. Goals:
-
-- Verify `serve_server` + a duplex stream compose with rmcp 0.1.5.
-- Verify the client peer's `call_tool` returns a usable `CallToolResult`.
-- Establish baseline latency (target: <100ms per subtest).
-
-If the spike works, write the three subtests in the same module.
-
-### Fallback if the spike does not compose
-
-If `tokio::io::duplex` + rmcp's serve loops cannot be wired up without significant test-infra work, fall back to:
-
-1. **Direct dispatch**: call `ZoteroServer::call_tool(CallToolRequestParam {...}, ctx).await` with a hand-constructed `RequestContext`. Skips the JSON-RPC wire but still exercises the rmcp tool macro dispatch and the schemars-driven argument parsing. (The `RequestContext` requires a `Peer<RoleServer>`, which itself requires a transport — confirm during the spike whether this fallback is even available without spinning up a transport.)
-2. **Schema audit guard**: `crates/zotero-mcp/tests/schema_shape.rs` (new). Uses `schemars::schema_for!(CreateItemArgs)`, `ProposeArgs`, `EnrichArgs` and asserts the generated schemas have `type: object` / `type: array` with `items.type: object` at the right paths. Fast, self-contained, no transport. Validates Slice B independently of the roundtrip test.
-
-The `schema_shape.rs` test is written regardless — it adds the fastest possible regression guard for Slice B at near-zero cost.
+`schema_shape.rs` proves the *cause* of the bug (untyped schema) cannot reoccur. The skill author exercises the lookup → create_item chain against the running server when using the skill — that is the real-world integration check, and it costs nothing.
 
 ---
 
@@ -323,51 +306,59 @@ The `schema_shape.rs` test is written regardless — it adds the fastest possibl
 
 ### New tests
 
-1. **`tests/enrich_openlibrary.rs` — extend**
-   - Five date-parser subtests (one per row in the table above).
-   - `source_url` subtest: asserts the URL now points at `/isbn/{isbn}`.
-   - Flat-shape subtest: calls `lookup_isbn_t` with `format: "zotero"`, parses `CallToolResult.content[0]` as JSON, asserts top-level has `itemType`/`title`/`creators`/`extra`; `creators[0]` has `creatorType`/`firstName`/`lastName` (no underscores, no `orderIndex`); `extra` contains `source: openlibrary` and `sourceURL: …`; no `source`, `source_url`, or `fields` keys at the top level.
+1. **`crates/zotero-mcp/src/core/enrichment/openlibrary.rs::tests` — new unit tests**
+   - Date-parser cases: `"2020"`, `"2020-05"`, `"1998-09-08"`, `"March 5, 2020"`, `"Mar 5, 2020"`, `"5 March 2020"`, `"March 2020"`, `"Mar 2020"`, `"sometime in 2020"` (unparseable → pass-through), whitespace trim.
 
-2. **`tests/enrich_crossref.rs` — extend**
-   - Flat-shape subtest, structurally parallel to (1)'s flat-shape case. Asserts `extra` contains `source: crossref` and a `sourceURL` line (since CrossRef populates `source_url` from the `URL` field).
+2. **`tests/enrich_openlibrary.rs::lookup_isbn_normalizes` — extend**
+   - Existing test asserts on the envelope; add assertions that the date is now ISO 8601 and that `source_url` points at `/isbn/{isbn}`.
+   - Pass the resulting `NormalizedRecord` through `normalized_to_item(&r)` and assert the flat output: top-level has `itemType`/`title`/`creators`/`extra`; `creators[0]` has `creatorType`/`firstName`/`lastName` (no underscores); `extra` contains `source: openlibrary` and `sourceURL: …`; no `source`/`source_url`/`fields` keys at the top level.
 
-3. **`tests/enrich_arxiv.rs` — extend**
-   - Flat-shape subtest, structurally parallel. arXiv's `source_url` is `None` today, so the test asserts `extra` contains `source: arxiv` and no `sourceURL` line.
+3. **`tests/enrich_crossref.rs::lookup_doi_normalizes_to_zotero_fields` — extend**
+   - Same approach: existing test asserts on the envelope; add assertions on `normalized_to_item(&r)` output. `extra` should contain `source: crossref` and a `sourceURL` line (CrossRef populates `source_url` from the `URL` field).
 
-4. **`tests/lookup_to_create_roundtrip.rs` — new** (Slice C primary)
-   - Spike test: `ping` over in-memory transport.
-   - `lookup_isbn → create_item` roundtrip.
-   - `lookup_doi → create_item` roundtrip.
-   - `lookup_arxiv → create_item` roundtrip.
-   - Each subtest uses `wiremock::matchers::body_partial_json` on the Zotero mock to assert that the received body's first element has the expected `itemType` — which transitively proves the JSON was transmitted as a structured object, not stringified.
+4. **`tests/enrich_arxiv.rs::lookup_arxiv_parses_atom` — extend**
+   - Same approach. arXiv's `source_url` is `None` today, so `extra` should contain `source: arxiv` and **no** `sourceURL` line.
 
-5. **`tests/schema_shape.rs` — new**
-   - `schemars::schema_for!(CreateItemArgs)` → asserts `properties.item.type == "object"`.
-   - `schemars::schema_for!(ProposeArgs)` → asserts `properties.candidates.type == "array"` AND `properties.candidates.items.type == "object"`.
-   - Same for `EnrichArgs`.
+5. **`crates/zotero-mcp/src/core/enrichment/mod.rs::tests` — new unit tests**
+   - `flat_output_is_object_with_item_type_from_fields`
+   - `creators_use_zotero_camel_case` (no `creator_type`/`first_name`/`last_name`/`orderIndex` keys)
+   - `extra_field_stashes_source_and_source_url`
+   - `extra_omits_source_url_line_when_none`
+   - `extra_appends_to_existing_extra_field`
+   - `creator_with_only_last_name_omits_first_name_key`
+
+6. **`crates/zotero-mcp/src/tools/enrichment.rs::tests` — new unit tests for `render_record`**
+   - `render_record(record, "zotero")` returns the flattened item.
+   - `render_record(record, "candidate")` returns the envelope.
+   - `render_record(record, "garbage")` returns an `invalid_params` error.
+
+7. **`tests/schema_shape.rs` — new**
+   - `create_item_args_item_is_object_typed`
+   - `propose_args_candidates_is_array_of_objects`
+   - `enrich_args_candidates_is_array_of_objects`
 
 ### Coverage matrix
 
 | Concern | Test |
 |---|---|
-| OpenLibrary date parsing edge cases | `enrich_openlibrary.rs` extensions |
-| OpenLibrary `source_url` points at the record | `enrich_openlibrary.rs` extension |
-| Flat Zotero shape from `lookup_*_t` | `enrich_{openlibrary,crossref,arxiv}.rs` flat-shape subtests |
-| `extra` field provenance stashing | `enrich_{openlibrary,crossref,arxiv}.rs` flat-shape subtests |
-| Creator camelCase rename | `enrich_*.rs` flat-shape subtests |
-| Tool schemas have `type: object` / `type: array` with `items.type: object` | `schema_shape.rs` |
-| End-to-end lookup→create over MCP wire | `lookup_to_create_roundtrip.rs` |
+| OpenLibrary date parsing edge cases | `openlibrary.rs::tests` unit tests (item 1) |
+| OpenLibrary `source_url` points at the record | `enrich_openlibrary.rs` extension (item 2) |
+| Flat Zotero shape via `normalized_to_item` | `enrich_{openlibrary,crossref,arxiv}.rs` extensions (items 2–4) + `mod.rs::tests` (item 5) |
+| `extra` field provenance stashing | `mod.rs::tests` (item 5) + `enrich_*.rs` extensions (items 2–4) |
+| Creator camelCase rename | `mod.rs::tests` (item 5) |
+| `format` dispatch in `lookup_*_t` | `tools/enrichment.rs::tests` `render_record` unit tests (item 6) |
+| Tool schemas have `type: object` / `type: array` with `items.type: object` | `schema_shape.rs` (item 7) |
 | Existing envelope-consuming flows | Existing `enrich_propose.rs` (unchanged) |
 
 ---
 
 ## Implementation order
 
-1. **Slice A** — output shape switch + tool descriptions. Self-contained; tests 1, 2, 3 cover it.
-2. **Slice B** — schema type changes. Independently mergeable from A but easier to debug afterwards. Test 5 (`schema_shape.rs`) is written here.
-3. **Slice C** — roundtrip test. Spike first, then three subtests if the spike succeeds. Validates A and B together.
+1. **Slice A** — output shape switch + tool descriptions.
+2. **Slice B** — schema type changes.
+3. **Slice C** — `schema_shape.rs` regression guard.
 
-Each slice ships as its own commit. A and B can land in either order; C blocks on both.
+Each slice ships as its own commit. A and B can land in either order; C blocks on B.
 
 ---
 
@@ -375,18 +366,15 @@ Each slice ships as its own commit. A and B can land in either order; C blocks o
 
 1. **Breaking change for chained callers.** Any caller previously doing `lookup_* → propose_metadata_update` without an explicit `format` will start sending flat Zotero items where envelopes are expected. `parse_candidates` will fail with `invalid_params: candidates[N] invalid NormalizedRecord: missing field 'source'`. The error is clear and surfaces at the right boundary, but it *is* breaking. Mitigated by explicit mention in the propose/enrich tool descriptions. Pre-1.0 project, version is 0.2.0; breaking change is acceptable.
 
-2. **Roundtrip test infra may not compose with rmcp 0.1.5.** The library's own tests do not exercise the embedded-server+client pattern. Mitigated by:
-   - Spike step (build `ping`-only roundtrip first).
-   - `schema_shape.rs` fallback that keeps Slice B validated even if Slice C reduces to direct `call_tool()` invocations or is dropped entirely.
+2. **OpenLibrary's `publish_date` has more freeform variants than the documented cases.** Real-world data includes `"c. 2020"`, `"[2020]"`, `"2020 [reprinted 2024]"`, abbreviated months in non-English locales, etc. The parser returns the original string on failure rather than dropping the field, so worst case is a non-ISO date survives — which is exactly what happens today. No regression.
 
-3. **OpenLibrary's `publish_date` has more freeform variants than the documented five cases.** Real-world data includes `"c. 2020"`, `"[2020]"`, `"2020 [reprinted 2024]"`, abbreviated months in non-English locales, etc. The parser returns the original string on failure rather than dropping the field, so worst case is a non-ISO date survives — which is exactly what happens today. No regression.
+3. **Internal `Creator` snake_case vs Zotero camelCase.** The rename lives only inside `normalized_to_item`. If anyone later assumes the wire shape and the internal struct share field names, they will be wrong. Mitigation: a comment on `normalized_to_item` documenting the rename and why the internal struct does not change.
 
-4. **Internal `Creator` snake_case vs Zotero camelCase.** The rename lives only inside `normalized_to_item`. If anyone later assumes the wire shape and the internal struct share field names, they will be wrong. Mitigation: a comment on `normalized_to_item` documenting the rename and why the internal struct does not change.
+4. **No automated test exercises the JSON-RPC wire.** The schema-shape test prevents the *cause* of the stringification bug (untyped schemas), but if some other regression caused the wire-level data to be malformed in a new way, only manual usage of the running server would catch it. Acceptable: the cost of building an in-memory MCP transport in rmcp 0.1.5 is disproportionate; revisit if rmcp adds in-process test infrastructure.
 
 ---
 
 ## Decisions deferred to implementation
 
-- Exact `parse_date` implementation. Probably explicit format-string attempts in order; falls back to original string. If `chrono` is not already a dep, evaluate adding it vs writing a small custom parser. (Inspection of `Cargo.toml` suggests `chrono` is not in the workspace dependencies. The custom parser is preferred to avoid a new dep for what is a small set of patterns.)
-- Whether the spike for Slice C uses `rmcp::serve_server` directly or a higher-level helper. Confirm by reading rmcp 0.1.5 source during the spike.
+- Exact `parse_date` implementation. Custom parser preferred over a new dep (`chrono` is not in the workspace today). A small set of explicit format-recognition rules with a pass-through on failure.
 - Whether `serde_json::Map` or `BTreeMap` is the right concrete type for the schema-audit changes. Both produce `type: object`. `serde_json::Map` preserves insertion order which is nicer for debugging and round-tripping. Default to `serde_json::Map`.
