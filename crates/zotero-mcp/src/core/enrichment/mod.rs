@@ -1,3 +1,7 @@
+// Date format audit (2026-05-13): all three sources emit ISO 8601 dates.
+// - openlibrary: normalised via parse_date (handles freeform publish_date).
+// - crossref: extract_date pads {YYYY, MM, DD} parts to 2-digit width.
+// - arxiv: published timestamps split at 'T' (arXiv always sends ISO 8601).
 pub mod crossref;
 pub mod openlibrary;
 pub mod arxiv;
