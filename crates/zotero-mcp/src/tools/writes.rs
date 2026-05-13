@@ -1,6 +1,6 @@
 use crate::state::AppState;
 use crate::tools::search::map_err;
-use rmcp::Error;
+use rmcp::ErrorData as Error;
 use rmcp::model::{CallToolResult, Content};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

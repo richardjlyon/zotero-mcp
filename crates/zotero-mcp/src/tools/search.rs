@@ -1,5 +1,5 @@
 use crate::state::AppState;
-use rmcp::Error;
+use rmcp::ErrorData as Error;
 use rmcp::model::{CallToolResult, Content};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
