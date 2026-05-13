@@ -58,8 +58,13 @@ pub async fn run(
         .with_sse_keep_alive(Some(Duration::from_secs(5)))
         .with_stateful_mode(stateful_mode)
         .with_json_response(json_response);
-    if let Some(hosts) = allowed_hosts_override {
-        config = config.with_allowed_hosts(hosts);
+    match allowed_hosts_override {
+        Some(hosts) => config = config.with_allowed_hosts(hosts),
+        // rmcp's default is loopback-only (localhost/127.0.0.1/::1), which
+        // would reject Cloudflare-tunnel-fronted requests. The spec wants
+        // unset = preserve prior behaviour (no Host check); rmcp exposes
+        // this directly as disable_allowed_hosts.
+        None => config = config.disable_allowed_hosts(),
     }
 
     let state_for_factory = state.clone();
