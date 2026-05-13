@@ -3,6 +3,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 use tempfile::tempdir;
 use zotero_mcp::core::cache::DiskCache;
 use zotero_mcp::core::enrichment::arxiv::ArxivClient;
+use zotero_mcp::core::enrichment::normalized_to_item;
 
 const SAMPLE_ATOM: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <feed xmlns="http://www.w3.org/2005/Atom">
@@ -25,7 +26,21 @@ async fn lookup_arxiv_parses_atom() {
     let dir = tempdir().unwrap();
     let c = ArxivClient::new(server.uri(), DiskCache::new(dir.path().to_path_buf(), 60), "test/0.1");
     let r = c.lookup_arxiv("2401.00001").await.unwrap();
+
+    // Envelope assertions.
     assert_eq!(r.fields["title"], "A Cool Preprint");
     assert_eq!(r.fields["itemType"], "preprint");
     assert_eq!(r.creators.len(), 2);
+
+    // Flat-shape assertions.
+    let v = normalized_to_item(&r);
+    assert_eq!(v["itemType"], "preprint");
+    assert_eq!(v["title"], "A Cool Preprint");
+    assert_eq!(v["date"], "2024-01-01");
+    assert_eq!(v["creators"].as_array().unwrap().len(), 2);
+
+    let extra = v["extra"].as_str().unwrap();
+    assert!(extra.contains("source: arxiv"));
+    // arXiv parser does not populate source_url today.
+    assert!(!extra.contains("sourceURL"), "got: {extra:?}");
 }
