@@ -10,15 +10,16 @@ use crate::tools::writes::{
     self as wr, AddNoteArgs, CollectionArgs, DeleteItemArgs, TagArgs, UpdateFieldsArgs,
 };
 use rmcp::{
-    Error as McpError, ServerHandler,
+    ErrorData as McpError, ServerHandler,
+    handler::server::wrapper::Parameters,
     model::{
         AnnotateAble, CallToolResult, Content, Implementation,
-        ListResourcesResult, PaginatedRequestParam, ProtocolVersion,
-        RawResource, ReadResourceRequestParam, ReadResourceResult,
+        ListResourcesResult, PaginatedRequestParams,
+        RawResource, ReadResourceRequestParams, ReadResourceResult,
         ResourceContents, ServerCapabilities, ServerInfo,
     },
     service::RequestContext,
-    tool, RoleServer,
+    tool, tool_handler, tool_router, RoleServer,
 };
 
 #[derive(Clone)]
@@ -26,7 +27,7 @@ pub struct ZoteroServer {
     pub state: AppState,
 }
 
-#[tool(tool_box)]
+#[tool_router]
 impl ZoteroServer {
     pub fn new(state: AppState) -> Self {
         Self { state }
@@ -45,7 +46,7 @@ impl ZoteroServer {
     #[tool(description = "Search the local Zotero library (metadata + optional fulltext).")]
     pub async fn search_items(
         &self,
-        #[tool(aggr)] args: SearchArgs,
+        Parameters(args): Parameters<SearchArgs>,
     ) -> Result<CallToolResult, McpError> {
         search::search_items(&self.state, args).await
     }
@@ -55,7 +56,7 @@ impl ZoteroServer {
     )]
     pub async fn get_item(
         &self,
-        #[tool(aggr)] args: GetItemArgs,
+        Parameters(args): Parameters<GetItemArgs>,
     ) -> Result<CallToolResult, McpError> {
         search::get_item(&self.state, args).await
     }
@@ -63,7 +64,7 @@ impl ZoteroServer {
     #[tool(description = "List all collections in the user's library.")]
     pub async fn list_collections(
         &self,
-        #[tool(aggr)] args: EmptyArgs,
+        Parameters(args): Parameters<EmptyArgs>,
     ) -> Result<CallToolResult, McpError> {
         search::list_collections(&self.state, args).await
     }
@@ -71,7 +72,7 @@ impl ZoteroServer {
     #[tool(description = "List tags, optionally filtered by prefix.")]
     pub async fn list_tags(
         &self,
-        #[tool(aggr)] args: ListTagsArgs,
+        Parameters(args): Parameters<ListTagsArgs>,
     ) -> Result<CallToolResult, McpError> {
         search::list_tags(&self.state, args).await
     }
@@ -81,7 +82,7 @@ impl ZoteroServer {
     )]
     pub async fn list_recent_items(
         &self,
-        #[tool(aggr)] args: RecentArgs,
+        Parameters(args): Parameters<RecentArgs>,
     ) -> Result<CallToolResult, McpError> {
         search::list_recent_items(&self.state, args).await
     }
@@ -89,7 +90,7 @@ impl ZoteroServer {
     #[tool(description = "List file attachments and snapshots for an item, with resolved absolute paths.")]
     pub async fn list_attachments(
         &self,
-        #[tool(aggr)] args: AttachItemKey,
+        Parameters(args): Parameters<AttachItemKey>,
     ) -> Result<CallToolResult, McpError> {
         att::list_attachments_t(&self.state, args).await
     }
@@ -97,7 +98,7 @@ impl ZoteroServer {
     #[tool(description = "Get the absolute filesystem path to a Zotero attachment. For text extraction prefer get_pdf_text — it has built-in fallback to pdftotext on PDFs that trip pdf-extract. Use this path only when you need raw bytes (e.g. binary handling, OCR pipelines).")]
     pub async fn get_pdf_path(
         &self,
-        #[tool(aggr)] args: AttachItemKey,
+        Parameters(args): Parameters<AttachItemKey>,
     ) -> Result<CallToolResult, McpError> {
         att::get_pdf_path(&self.state, args).await
     }
@@ -105,7 +106,7 @@ impl ZoteroServer {
     #[tool(description = "Read full extracted PDF text for an item. Resolution order: .zotero-ft-cache → in-process pdf-extract → pdftotext fallback (automatic, when Poppler is on PATH). The `source` field on the response identifies which engine succeeded (zotero_cache | live_extract | pdftotext_fallback). Callers do not need to handle fallback manually — extraction is resilient to PDFs that trip pdf-extract.")]
     pub async fn get_pdf_text(
         &self,
-        #[tool(aggr)] args: AttachItemKey,
+        Parameters(args): Parameters<AttachItemKey>,
     ) -> Result<CallToolResult, McpError> {
         att::get_pdf_text_t(&self.state, args).await
     }
@@ -113,7 +114,7 @@ impl ZoteroServer {
     #[tool(description = "Read the first N pages of a PDF (default 2). Useful for cheap context grabs. Uses the same resilient extraction chain as get_pdf_text (cache → pdf-extract → pdftotext fallback).")]
     pub async fn get_pdf_first_pages(
         &self,
-        #[tool(aggr)] args: FirstPagesArgs,
+        Parameters(args): Parameters<FirstPagesArgs>,
     ) -> Result<CallToolResult, McpError> {
         att::get_pdf_first_pages_t(&self.state, args).await
     }
@@ -121,7 +122,7 @@ impl ZoteroServer {
     #[tool(description = "List PDF annotations (highlights, comments) for an item.")]
     pub async fn list_annotations(
         &self,
-        #[tool(aggr)] args: AttachItemKey,
+        Parameters(args): Parameters<AttachItemKey>,
     ) -> Result<CallToolResult, McpError> {
         att::list_annotations_t(&self.state, args).await
     }
@@ -129,7 +130,7 @@ impl ZoteroServer {
     #[tool(description = "Read webpage content for an item via stored snapshot or live fetch (mode = snapshot|live|auto).")]
     pub async fn get_webpage_content(
         &self,
-        #[tool(aggr)] args: WebArgs,
+        Parameters(args): Parameters<WebArgs>,
     ) -> Result<CallToolResult, McpError> {
         att::get_webpage_content_t(&self.state, args).await
     }
@@ -137,7 +138,7 @@ impl ZoteroServer {
     #[tool(description = "Re-fetch a webpage item live, optionally saving a fresh HTML snapshot as an attachment.")]
     pub async fn refetch_url(
         &self,
-        #[tool(aggr)] args: RefetchArgs,
+        Parameters(args): Parameters<RefetchArgs>,
     ) -> Result<CallToolResult, McpError> {
         att::refetch_url_t(&self.state, args).await
     }
@@ -145,7 +146,7 @@ impl ZoteroServer {
     #[tool(description = "Format a single Zotero item as a citation (style = CSL name, e.g. 'apa', 'chicago-author-date'; format = 'bib'|'biblatex'|'bibtex'|'ris').")]
     pub async fn format_citation(
         &self,
-        #[tool(aggr)] args: FormatCitationArgs,
+        Parameters(args): Parameters<FormatCitationArgs>,
     ) -> Result<CallToolResult, McpError> {
         cit::format_citation_t(&self.state, args).await
     }
@@ -153,38 +154,38 @@ impl ZoteroServer {
     #[tool(description = "Format multiple Zotero items as a combined bibliography (same style/format options as format_citation).")]
     pub async fn format_bibliography(
         &self,
-        #[tool(aggr)] args: FormatBibArgs,
+        Parameters(args): Parameters<FormatBibArgs>,
     ) -> Result<CallToolResult, McpError> {
         cit::format_bibliography_t(&self.state, args).await
     }
 
     #[tool(description = "Attach a markdown/HTML note to a Zotero item (markdown converted to simple HTML).")]
-    pub async fn add_note(&self, #[tool(aggr)] args: AddNoteArgs) -> Result<CallToolResult, McpError> {
+    pub async fn add_note(&self, Parameters(args): Parameters<AddNoteArgs>) -> Result<CallToolResult, McpError> {
         wr::add_note_t(&self.state, args).await
     }
 
     #[tool(description = "Patch arbitrary fields on an item (auto-detects current version for If-Unmodified-Since-Version).")]
-    pub async fn update_item_fields(&self, #[tool(aggr)] args: UpdateFieldsArgs) -> Result<CallToolResult, McpError> {
+    pub async fn update_item_fields(&self, Parameters(args): Parameters<UpdateFieldsArgs>) -> Result<CallToolResult, McpError> {
         wr::update_item_fields_t(&self.state, args).await
     }
 
     #[tool(description = "Add tags to an item (deduplicates against existing tags).")]
-    pub async fn add_tags(&self, #[tool(aggr)] args: TagArgs) -> Result<CallToolResult, McpError> {
+    pub async fn add_tags(&self, Parameters(args): Parameters<TagArgs>) -> Result<CallToolResult, McpError> {
         wr::add_tags_t(&self.state, args).await
     }
 
     #[tool(description = "Remove tags from an item.")]
-    pub async fn remove_tags(&self, #[tool(aggr)] args: TagArgs) -> Result<CallToolResult, McpError> {
+    pub async fn remove_tags(&self, Parameters(args): Parameters<TagArgs>) -> Result<CallToolResult, McpError> {
         wr::remove_tags_t(&self.state, args).await
     }
 
     #[tool(description = "Add an item to a collection (by collection key).")]
-    pub async fn add_to_collection(&self, #[tool(aggr)] args: CollectionArgs) -> Result<CallToolResult, McpError> {
+    pub async fn add_to_collection(&self, Parameters(args): Parameters<CollectionArgs>) -> Result<CallToolResult, McpError> {
         wr::add_to_collection_t(&self.state, args).await
     }
 
     #[tool(description = "Remove an item from a collection (by collection key).")]
-    pub async fn remove_from_collection(&self, #[tool(aggr)] args: CollectionArgs) -> Result<CallToolResult, McpError> {
+    pub async fn remove_from_collection(&self, Parameters(args): Parameters<CollectionArgs>) -> Result<CallToolResult, McpError> {
         wr::remove_from_collection_t(&self.state, args).await
     }
 
@@ -193,14 +194,14 @@ impl ZoteroServer {
                        Recoverable: items remain in the library until the trash is emptied. \
                        Use this when the user explicitly asks to delete something."
     )]
-    pub async fn delete_item(&self, #[tool(aggr)] args: DeleteItemArgs) -> Result<CallToolResult, McpError> {
+    pub async fn delete_item(&self, Parameters(args): Parameters<DeleteItemArgs>) -> Result<CallToolResult, McpError> {
         wr::delete_item_t(&self.state, args).await
     }
 
     #[tool(description = "Create a new Zotero item. Input: { item: <Zotero-shaped JSON object with required itemType field>, collection_keys?: [string] }. Returns { item_key, version }. Tags are an array of objects: [{\"tag\": \"x\"}]. Creators use Zotero's creatorType vocabulary (author/editor/translator/etc). For metadata-discovery flows, lookup_doi / search_crossref return the JSON shape directly compatible with this tool.")]
     pub async fn create_item(
         &self,
-        #[tool(aggr)] args: att::CreateItemArgs,
+        Parameters(args): Parameters<att::CreateItemArgs>,
     ) -> Result<CallToolResult, McpError> {
         att::create_item_t(&self.state, args).await
     }
@@ -208,7 +209,7 @@ impl ZoteroServer {
     #[tool(description = "Attach a URL as a child of a Zotero item (linkMode: linked_url). No bytes transfer; Zotero stores just the URL. Use this for online resources you want listed alongside an item without downloading them. Input: { parent_key, url, title? }. Returns { attachment_key }.")]
     pub async fn attach_link(
         &self,
-        #[tool(aggr)] args: att::AttachLinkArgs,
+        Parameters(args): Parameters<att::AttachLinkArgs>,
     ) -> Result<CallToolResult, McpError> {
         att::attach_link_t(&self.state, args).await
     }
@@ -216,89 +217,86 @@ impl ZoteroServer {
     #[tool(description = "Attach a local file to a Zotero parent item. Two storage modes: \"imported_file\" (bytes uploaded to Zotero's cloud and downloaded locally on each device — Zotero's default) or \"linked_file\" (Zotero stores only a path reference; the file lives wherever you put it — useful for BYO-storage setups like Resilio/Syncthing). Default mode comes from cfg.zotero.attachment_mode; per-call override allowed. For linked_file, the file must be under cfg.zotero.linked_attachment_base_dir. Input: { parent_key, file_path (absolute), mode?, filename?, content_type? }. Returns { attachment_key }.")]
     pub async fn attach_file(
         &self,
-        #[tool(aggr)] args: att::AttachFileArgs,
+        Parameters(args): Parameters<att::AttachFileArgs>,
     ) -> Result<CallToolResult, McpError> {
         att::attach_file_t(&self.state, args).await
     }
 
     #[tool(description = "Find items with weak metadata (missing DOI/abstract, stub titles).")]
-    pub async fn find_weak_metadata_items(&self, #[tool(aggr)] args: WeakArgs) -> Result<CallToolResult, McpError> {
+    pub async fn find_weak_metadata_items(&self, Parameters(args): Parameters<WeakArgs>) -> Result<CallToolResult, McpError> {
         en::find_weak_metadata_items_t(&self.state, args).await
     }
 
     #[tool(description = "Look up a DOI via CrossRef. \
                           `format='zotero'` (default) returns a flat Zotero item ready to pass straight to `create_item`; \
                           `format='candidate'` returns an envelope `{source, fields, creators, source_url}` for use with `propose_metadata_update` and `enrich_item`.")]
-    pub async fn lookup_doi(&self, #[tool(aggr)] args: DoiArgs) -> Result<CallToolResult, McpError> {
+    pub async fn lookup_doi(&self, Parameters(args): Parameters<DoiArgs>) -> Result<CallToolResult, McpError> {
         en::lookup_doi_t(&self.state, args).await
     }
 
     #[tool(description = "Look up an ISBN via OpenLibrary. \
                           `format='zotero'` (default) returns a flat Zotero item ready to pass straight to `create_item`; \
                           `format='candidate'` returns an envelope `{source, fields, creators, source_url}` for use with `propose_metadata_update` and `enrich_item`.")]
-    pub async fn lookup_isbn(&self, #[tool(aggr)] args: IsbnArgs) -> Result<CallToolResult, McpError> {
+    pub async fn lookup_isbn(&self, Parameters(args): Parameters<IsbnArgs>) -> Result<CallToolResult, McpError> {
         en::lookup_isbn_t(&self.state, args).await
     }
 
     #[tool(description = "Look up an arXiv preprint by ID. \
                           `format='zotero'` (default) returns a flat Zotero item ready to pass straight to `create_item`; \
                           `format='candidate'` returns an envelope `{source, fields, creators, source_url}` for use with `propose_metadata_update` and `enrich_item`.")]
-    pub async fn lookup_arxiv(&self, #[tool(aggr)] args: ArxivArgs) -> Result<CallToolResult, McpError> {
+    pub async fn lookup_arxiv(&self, Parameters(args): Parameters<ArxivArgs>) -> Result<CallToolResult, McpError> {
         en::lookup_arxiv_t(&self.state, args).await
     }
 
     #[tool(description = "Search CrossRef by free-text query; returns normalized candidates.")]
-    pub async fn search_crossref(&self, #[tool(aggr)] args: SearchSourceArgs) -> Result<CallToolResult, McpError> {
+    pub async fn search_crossref(&self, Parameters(args): Parameters<SearchSourceArgs>) -> Result<CallToolResult, McpError> {
         en::search_crossref_t(&self.state, args).await
     }
 
     #[tool(description = "Search Semantic Scholar by free-text query; returns normalized candidates.")]
-    pub async fn search_semantic_scholar(&self, #[tool(aggr)] args: SearchSourceArgs) -> Result<CallToolResult, McpError> {
+    pub async fn search_semantic_scholar(&self, Parameters(args): Parameters<SearchSourceArgs>) -> Result<CallToolResult, McpError> {
         en::search_semantic_scholar_t(&self.state, args).await
     }
 
     #[tool(description = "Score candidate metadata and produce an EnrichmentProposal (does not apply). \
                           Candidates must be lookup results obtained with `format='candidate'`. \
                           Items obtained with the default `format='zotero'` will fail validation because the scoring logic requires the envelope's `source` field.")]
-    pub async fn propose_metadata_update(&self, #[tool(aggr)] args: ProposeArgs) -> Result<CallToolResult, McpError> {
+    pub async fn propose_metadata_update(&self, Parameters(args): Parameters<ProposeArgs>) -> Result<CallToolResult, McpError> {
         en::propose_metadata_update_t(&self.state, args).await
     }
 
     #[tool(description = "Apply a previously generated EnrichmentProposal to Zotero.")]
-    pub async fn apply_metadata_update(&self, #[tool(aggr)] args: ApplyArgs) -> Result<CallToolResult, McpError> {
+    pub async fn apply_metadata_update(&self, Parameters(args): Parameters<ApplyArgs>) -> Result<CallToolResult, McpError> {
         en::apply_metadata_update_t(&self.state, args).await
     }
 
     #[tool(description = "Compose propose+apply: only auto-applies when confidence >= threshold AND multi-source agreement. \
                           Candidates must be lookup results obtained with `format='candidate'`. \
                           Items obtained with the default `format='zotero'` will fail validation because the scoring logic requires the envelope's `source` field.")]
-    pub async fn enrich_item(&self, #[tool(aggr)] args: EnrichArgs) -> Result<CallToolResult, McpError> {
+    pub async fn enrich_item(&self, Parameters(args): Parameters<EnrichArgs>) -> Result<CallToolResult, McpError> {
         en::enrich_item_t(&self.state, args).await
     }
 }
 
-#[tool(tool_box)]
+#[tool_handler]
 impl ServerHandler for ZoteroServer {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo {
-            protocol_version: ProtocolVersion::default(),
-            capabilities: ServerCapabilities::builder()
+        ServerInfo::new(
+            ServerCapabilities::builder()
                 .enable_tools()
                 .enable_resources()
                 .build(),
-            server_info: Implementation {
-                name: "zotero-mcp".into(),
-                version: env!("CARGO_PKG_VERSION").into(),
-            },
-            instructions: Some(
-                "Local Zotero library bridge (read + write via Local API)".into(),
-            ),
-        }
+        )
+        .with_server_info(Implementation::new(
+            "zotero-mcp",
+            env!("CARGO_PKG_VERSION"),
+        ))
+        .with_instructions("Local Zotero library bridge (read + write via Local API)")
     }
 
     async fn list_resources(
         &self,
-        _request: PaginatedRequestParam,
+        _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListResourcesResult, McpError> {
         let make = |uri: &str, name: &str, desc: &str| {
@@ -307,26 +305,23 @@ impl ServerHandler for ZoteroServer {
             raw.mime_type = Some("application/json".to_string());
             raw.no_annotation()
         };
-        Ok(ListResourcesResult {
-            resources: vec![
-                make(
-                    "zotero://collections",
-                    "Zotero collections",
-                    "All collections in the user's library",
-                ),
-                make(
-                    "zotero://tags",
-                    "Zotero tags",
-                    "All tags in the user's library with counts",
-                ),
-            ],
-            next_cursor: None,
-        })
+        Ok(ListResourcesResult::with_all_items(vec![
+            make(
+                "zotero://collections",
+                "Zotero collections",
+                "All collections in the user's library",
+            ),
+            make(
+                "zotero://tags",
+                "Zotero tags",
+                "All tags in the user's library with counts",
+            ),
+        ]))
     }
 
     async fn read_resource(
         &self,
-        request: ReadResourceRequestParam,
+        request: ReadResourceRequestParams,
         _context: RequestContext<RoleServer>,
     ) -> Result<ReadResourceResult, McpError> {
         let body = match request.uri.as_str() {
@@ -344,8 +339,9 @@ impl ServerHandler for ZoteroServer {
             }
         };
         let text = body.map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        Ok(ReadResourceResult {
-            contents: vec![ResourceContents::text(text, request.uri)],
-        })
+        Ok(ReadResourceResult::new(vec![ResourceContents::text(
+            text,
+            request.uri,
+        )]))
     }
 }
