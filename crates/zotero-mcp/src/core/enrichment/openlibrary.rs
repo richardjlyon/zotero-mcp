@@ -135,9 +135,17 @@ pub(crate) fn parse_date(s: &str) -> String {
             }
         } else if let Ok(n) = tok.parse::<u32>() {
             if (1000..=9999).contains(&n) {
-                year = Some(n);
+                if year.is_none() {
+                    year = Some(n);
+                } else {
+                    unrecognised += 1;
+                }
             } else if (1..=31).contains(&n) {
-                day = Some(n);
+                if day.is_none() {
+                    day = Some(n);
+                } else {
+                    unrecognised += 1;
+                }
             } else {
                 unrecognised += 1;
             }
@@ -151,11 +159,29 @@ pub(crate) fn parse_date(s: &str) -> String {
     }
 
     match (year, month, day) {
-        (Some(y), Some(m), Some(d)) => format!("{:04}-{:02}-{:02}", y, m, d),
-        (Some(y), Some(m), None) => format!("{:04}-{:02}", y, m),
+        (Some(y), Some(m), Some(d)) if is_valid_ymd(y, m, d) => {
+            format!("{:04}-{:02}-{:02}", y, m, d)
+        }
+        (Some(y), Some(m), None) if (1..=12).contains(&m) => format!("{:04}-{:02}", y, m),
         (Some(y), None, None) => format!("{:04}", y),
         _ => trimmed.to_string(),
     }
+}
+
+fn is_valid_ymd(y: u32, m: u32, d: u32) -> bool {
+    let days_in_month = match m {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 => {
+            if (y % 4 == 0 && y % 100 != 0) || y % 400 == 0 {
+                29
+            } else {
+                28
+            }
+        }
+        _ => return false,
+    };
+    d >= 1 && d <= days_in_month
 }
 
 fn is_iso_date(s: &str) -> bool {
@@ -233,5 +259,41 @@ mod tests {
     #[test]
     fn parse_date_trims_whitespace() {
         assert_eq!(parse_date("  2020  "), "2020");
+    }
+
+    #[test]
+    fn parse_date_april_31_invalid_passes_through() {
+        assert_eq!(parse_date("April 31, 2020"), "April 31, 2020");
+    }
+
+    #[test]
+    fn parse_date_feb_29_non_leap_year_passes_through() {
+        assert_eq!(parse_date("Feb 29, 2021"), "Feb 29, 2021");
+    }
+
+    #[test]
+    fn parse_date_feb_29_leap_year_valid() {
+        assert_eq!(parse_date("Feb 29, 2020"), "2020-02-29");
+    }
+
+    #[test]
+    fn parse_date_duplicate_day_passes_through() {
+        assert_eq!(parse_date("5 6 March 2020"), "5 6 March 2020");
+    }
+
+    #[test]
+    fn parse_date_duplicate_year_passes_through() {
+        assert_eq!(parse_date("2020 2021"), "2020 2021");
+    }
+
+    #[test]
+    fn parse_date_day_without_month_passes_through() {
+        // Already passes today via the `_` fallthrough; lock it in.
+        assert_eq!(parse_date("5 2020"), "5 2020");
+    }
+
+    #[test]
+    fn parse_date_empty_string() {
+        assert_eq!(parse_date(""), "");
     }
 }
