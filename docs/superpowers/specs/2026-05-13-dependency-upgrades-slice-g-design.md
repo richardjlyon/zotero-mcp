@@ -303,3 +303,62 @@ Same flow as Slice F. One commit.
 - The exact set of internal callers of `find_weak_metadata_items` that need updating (Risk 2). A grep at implementation time enumerates the set.
 - Whether to keep or remove `Content` from the rmcp imports in each `tools/*.rs` file — depends on whether the file still has `Content::text` sites.
 - Whether `cargo fmt` re-wraps the now-longer return type signatures in any noisy way (similar to the Slice F observation). Acceptable to run `cargo fmt -p zotero-mcp` and include the result in the same commit.
+
+---
+
+## Implementation result (2026-05-13)
+
+**Partial delivery: 10 of 22 tools migrated.** The slice landed at commit `210c0c7` followed by a comment-clarity follow-up at `2564f1b`. Two constraint discoveries blocked the remaining 12:
+
+### 1. MCP-spec `type:object` root constraint (9 Vec-returning tools deferred)
+
+The MCP 2025-06-18 spec defines `structured_content` as a JSON object — its root JSON Schema must have `"type": "object"`. rmcp 1.7 enforces this at server startup: `schema_for_output<T>()` panics if a tool's `Json<T>` produces a root schema without `type: object`.
+
+`schemars` renders `Vec<T>` as `"type": "array"`, which fails the check. Affected tools:
+
+- `search_items`, `list_recent_items` (return `Vec<SearchHit>`)
+- `list_collections` (returns `Vec<Collection>`)
+- `list_tags` (returns `Vec<Tag>`)
+- `list_attachments` (returns `Vec<Attachment>`)
+- `list_annotations` (returns `Vec<Annotation>`)
+- `search_crossref`, `search_semantic_scholar` (return `Vec<NormalizedRecord>`)
+- `find_weak_metadata_items` (returns `Vec<(String, Vec<String>)>`)
+
+**Workaround considered and rejected:** wrap each Vec in an envelope struct (`SearchHitsResult { items: Vec<SearchHit> }`, etc.). This satisfies the type-object requirement but changes the wire format of `content[0].text` from `[...]` (bare JSON array) to `{"items":[...]}` (object). That's a breaking change for any client reading `content[0].text` as JSON. Cowork's behaviour against the migrated wire format is unverified — risk of silent breakage in production.
+
+**Status:** deferred until the wire-format question is settled. A Slice G-followup with an agreed wire-format policy (envelope-struct-with-breaking-change vs. leave on `CallToolResult` indefinitely) is the natural next step.
+
+### 2. `serde_json::Value` has no root `"type"` (3 lookup tools deferred)
+
+Spec Decision 4 originally proposed `Json<serde_json::Value>` for `lookup_doi`, `lookup_isbn`, `lookup_arxiv` (since their `render_record()` output shape varies on the `format` parameter). `serde_json::Value`'s `JsonSchema` impl produces a schema with no root `"type"` field at all, also failing rmcp's startup check.
+
+**Workaround considered and rejected:** define a `#[serde(untagged)] enum LookupResult { Zotero(Map<String, Value>), Candidate(NormalizedRecord) }`. Schema becomes `oneOf` of two object variants, which technically has `"type": "object"` neither at the top level nor reliably inside the `oneOf` — schemars typically emits `oneOf` at the root without a sibling `"type"`. Even if it passed rmcp's check, the `oneOf` shape is awkward for client tooling.
+
+**Status:** deferred until the `format` parameter is redesigned. Most likely path: split into per-format tools (`lookup_doi_zotero`, `lookup_doi_candidate`) or remove `format` entirely and always return the candidate envelope. Out of Slice G's mechanical-port scope.
+
+### 3. What did land (10 object-shaped tools)
+
+These 10 tools migrated cleanly because their return types were already `type:object`:
+
+| Tool | `Json<T>` |
+|---|---|
+| `get_item` | `Json<Item>` |
+| `get_pdf_text` | `Json<PdfTextResult>` |
+| `get_pdf_first_pages` | `Json<PdfTextResult>` |
+| `get_webpage_content` | `Json<WebContentResult>` |
+| `refetch_url` | `Json<RefetchResult>` |
+| `create_item` | `Json<CreateItemResult>` |
+| `attach_link` | `Json<AttachmentResult>` |
+| `attach_file` | `Json<AttachmentResult>` |
+| `propose_metadata_update` | `Json<EnrichmentProposal>` |
+| `enrich_item` | `Json<EnrichmentProposal>` |
+
+For all 10, `content[0].text` is byte-identical to pre-slice (the JSON-stringified payload of the same object shape) and `structured_content` is populated additively. No wire-format regression.
+
+### 4. Future-proofing kept
+
+All 18 `JsonSchema` derives on `core/types.rs`, `core/pdf.rs`, `core/web.rs`, `core/enrichment/mod.rs` were retained, including on types only consumed by the deferred tools (`SearchHit`, `Collection`, `Tag`, `Attachment`, `Annotation`, `NormalizedRecord`). The derives cost nothing and unblock the deferred slice without re-touching `core/`.
+
+### 5. Test count
+
+Lib tests: **108** (was 107 at Slice F baseline; +1 from the new `output_schemas_emitted_for_json_returning_tools` smoke test). Smoke test asserts `output_schema.is_some()` on 4 migrated tools and `output_schema.is_none()` on 3 text-returning tools + 2 deferred-Vec tools (regression guard).
