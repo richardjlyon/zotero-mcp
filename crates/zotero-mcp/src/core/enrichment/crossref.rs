@@ -1,6 +1,6 @@
 use crate::core::cache::DiskCache;
-use crate::core::error::{Error, Result};
 use crate::core::enrichment::NormalizedRecord;
+use crate::core::error::{Error, Result};
 use crate::core::types::Creator;
 use serde_json::{Map, Value};
 
@@ -13,8 +13,15 @@ pub struct CrossrefClient {
 
 impl CrossrefClient {
     pub fn new(base: impl Into<String>, cache: DiskCache, user_agent: &str) -> Self {
-        let http = reqwest::Client::builder().user_agent(user_agent).build().unwrap();
-        Self { base: base.into(), cache, http }
+        let http = reqwest::Client::builder()
+            .user_agent(user_agent)
+            .build()
+            .unwrap();
+        Self {
+            base: base.into(),
+            cache,
+            http,
+        }
     }
 
     pub async fn lookup_doi(&self, doi: &str) -> Result<NormalizedRecord> {
@@ -48,9 +55,12 @@ impl CrossrefClient {
             return Ok(parse_search(&v));
         }
         let url = format!("{}/works", self.base);
-        let resp = self.http.get(&url)
+        let resp = self
+            .http
+            .get(&url)
             .query(&[("query", query), ("rows", &limit.to_string())])
-            .send().await?;
+            .send()
+            .await?;
         if !resp.status().is_success() {
             return Err(Error::Lookup {
                 r#source: "crossref".into(),
@@ -73,7 +83,11 @@ fn parse_search(v: &Value) -> Vec<NormalizedRecord> {
 
 fn normalize_work(msg: &Value) -> Option<NormalizedRecord> {
     let mut fields = Map::new();
-    if let Some(t) = msg.get("title").and_then(|x| x.as_array()).and_then(|a| a.first()) {
+    if let Some(t) = msg
+        .get("title")
+        .and_then(|x| x.as_array())
+        .and_then(|a| a.first())
+    {
         if let Some(s) = t.as_str() {
             fields.insert("title".into(), Value::String(s.to_string()));
         }
@@ -84,7 +98,8 @@ fn normalize_work(msg: &Value) -> Option<NormalizedRecord> {
     if let Some(date) = extract_date(msg) {
         fields.insert("date".into(), Value::String(date));
     }
-    if let Some(c) = msg.get("container-title")
+    if let Some(c) = msg
+        .get("container-title")
         .and_then(|x| x.as_array())
         .and_then(|a| a.first())
         .and_then(|x| x.as_str())

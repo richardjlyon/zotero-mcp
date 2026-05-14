@@ -164,12 +164,12 @@ pub async fn attach_file(
             attach_file_linked(api, parent_key, file_path, &filename, &content_type, opts).await
         }
         AttachmentMode::ImportedFile => {
-            let bytes = tokio::fs::read(file_path).await.map_err(|e| {
-                Error::UploadFailed {
+            let bytes = tokio::fs::read(file_path)
+                .await
+                .map_err(|e| Error::UploadFailed {
                     stage: "read",
                     detail: format!("reading {}: {}", file_path.display(), e),
-                }
-            })?;
+                })?;
             attach_file_imported(api, parent_key, &bytes, &filename, &content_type).await
         }
     }
@@ -185,12 +185,13 @@ async fn attach_file_linked(
 ) -> Result<String> {
     let path_value = match opts.linked_attachment_base_dir.as_ref() {
         Some(base) => {
-            let rel = file_path.strip_prefix(base).map_err(|_| {
-                Error::AttachmentOutsideBaseDir {
-                    file_path: file_path.to_path_buf(),
-                    base_dir: base.clone(),
-                }
-            })?;
+            let rel =
+                file_path
+                    .strip_prefix(base)
+                    .map_err(|_| Error::AttachmentOutsideBaseDir {
+                        file_path: file_path.to_path_buf(),
+                        base_dir: base.clone(),
+                    })?;
             format!("attachments:{}", rel.display())
         }
         None => {
@@ -253,10 +254,8 @@ async fn attach_file_imported(
     // for imported_file mode — they get set during the upload protocol.
     // Sending them here would make Zotero treat the row as already-linked,
     // and the subsequent authorize step would 412 with `file exists`.
-    let attach_key = create_imported_attachment_row(
-        api, parent_key, filename, content_type,
-    )
-    .await?;
+    let attach_key =
+        create_imported_attachment_row(api, parent_key, filename, content_type).await?;
 
     // Step 5.1b: authorize upload.
     match authorize_upload(api, &attach_key, &md5, filename, filesize, mtime).await? {

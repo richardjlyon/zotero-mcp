@@ -2,11 +2,21 @@ use crate::core::error::{Error, Result};
 use crate::core::reader::pool::ReadOnlyPool;
 use crate::core::types::SearchHit;
 
-pub async fn list(pool: &ReadOnlyPool, library_id: i64, sort_by: &str, limit: i64) -> Result<Vec<SearchHit>> {
+pub async fn list(
+    pool: &ReadOnlyPool,
+    library_id: i64,
+    sort_by: &str,
+    limit: i64,
+) -> Result<Vec<SearchHit>> {
     let col = match sort_by {
         "dateAdded" => "i.dateAdded",
         "dateModified" => "i.dateModified",
-        other => return Err(Error::Config(format!("sort_by must be dateAdded or dateModified, got {}", other))),
+        other => {
+            return Err(Error::Config(format!(
+                "sort_by must be dateAdded or dateModified, got {}",
+                other
+            )))
+        }
     };
     let sql = format!(
         "SELECT i.key, it.typeName,
@@ -25,7 +35,9 @@ pub async fn list(pool: &ReadOnlyPool, library_id: i64, sort_by: &str, limit: i6
         let mut stmt = c.prepare(&sql)?;
         let mut rows = stmt.query(rusqlite::params![library_id, limit])?;
         while let Some(r) = rows.next()? {
-            let year = r.get::<_, Option<String>>(3)?.and_then(|s| s.split('-').next().map(str::to_string));
+            let year = r
+                .get::<_, Option<String>>(3)?
+                .and_then(|s| s.split('-').next().map(str::to_string));
             out.push(SearchHit {
                 key: r.get(0)?,
                 citation_key: None,
@@ -37,5 +49,6 @@ pub async fn list(pool: &ReadOnlyPool, library_id: i64, sort_by: &str, limit: i6
             });
         }
         Ok(out)
-    }).await
+    })
+    .await
 }

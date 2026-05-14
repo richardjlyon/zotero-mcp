@@ -22,19 +22,33 @@ async fn fetch_item_meta(api: &LocalApi, key: &str) -> Result<(Vec<String>, Vec<
     let v: Value = resp.json().await?;
     let data = v.get("data").cloned().unwrap_or_default();
     let version = data.get("version").and_then(|x| x.as_i64()).unwrap_or(0);
-    let tags = data.get("tags").and_then(|t| t.as_array()).map(|arr|
-        arr.iter().filter_map(|e| e.get("tag").and_then(|s| s.as_str()).map(String::from)).collect()
-    ).unwrap_or_default();
-    let collections = data.get("collections").and_then(|c| c.as_array()).map(|arr|
-        arr.iter().filter_map(|x| x.as_str().map(String::from)).collect()
-    ).unwrap_or_default();
+    let tags = data
+        .get("tags")
+        .and_then(|t| t.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|e| e.get("tag").and_then(|s| s.as_str()).map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    let collections = data
+        .get("collections")
+        .and_then(|c| c.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|x| x.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
     Ok((tags, collections, version))
 }
 
 pub async fn add_tags(api: &LocalApi, key: &str, new_tags: &[String]) -> Result<()> {
     let (mut existing, _coll, version) = fetch_item_meta(api, key).await?;
     for t in new_tags {
-        if !existing.iter().any(|e| e == t) { existing.push(t.clone()); }
+        if !existing.iter().any(|e| e == t) {
+            existing.push(t.clone());
+        }
     }
     let json_tags: Vec<Value> = existing.into_iter().map(|t| json!({"tag": t})).collect();
     update_item_fields(api, key, version, json!({ "tags": json_tags })).await
@@ -42,15 +56,19 @@ pub async fn add_tags(api: &LocalApi, key: &str, new_tags: &[String]) -> Result<
 
 pub async fn remove_tags(api: &LocalApi, key: &str, tags_to_remove: &[String]) -> Result<()> {
     let (existing, _coll, version) = fetch_item_meta(api, key).await?;
-    let kept: Vec<Value> = existing.into_iter()
+    let kept: Vec<Value> = existing
+        .into_iter()
         .filter(|t| !tags_to_remove.iter().any(|r| r == t))
-        .map(|t| json!({"tag": t})).collect();
+        .map(|t| json!({"tag": t}))
+        .collect();
     update_item_fields(api, key, version, json!({ "tags": kept })).await
 }
 
 pub async fn add_to_collection(api: &LocalApi, key: &str, collection_key: &str) -> Result<()> {
     let (_tags, mut colls, version) = fetch_item_meta(api, key).await?;
-    if !colls.iter().any(|c| c == collection_key) { colls.push(collection_key.into()); }
+    if !colls.iter().any(|c| c == collection_key) {
+        colls.push(collection_key.into());
+    }
     update_item_fields(api, key, version, json!({ "collections": colls })).await
 }
 

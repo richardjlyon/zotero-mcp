@@ -60,7 +60,10 @@ fn find_arxiv(s: &str) -> Vec<String> {
 fn find_isbn(s: &str) -> Vec<String> {
     let mut out = vec![];
     for w in s.split_whitespace() {
-        let digits: String = w.chars().filter(|c| c.is_ascii_digit() || *c == 'X').collect();
+        let digits: String = w
+            .chars()
+            .filter(|c| c.is_ascii_digit() || *c == 'X')
+            .collect();
         if (digits.len() == 10 || digits.len() == 13) && !out.contains(&digits) {
             out.push(digits);
         }

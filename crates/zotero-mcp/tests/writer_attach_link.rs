@@ -57,7 +57,12 @@ async fn attach_link_uses_url_as_title_when_omitted() {
         .mount(&server)
         .await;
 
-    let _ = attach_link(&api(&server.uri()), "PARENT01", "https://example.com/page", None)
-        .await
-        .unwrap();
+    let _ = attach_link(
+        &api(&server.uri()),
+        "PARENT01",
+        "https://example.com/page",
+        None,
+    )
+    .await
+    .unwrap();
 }

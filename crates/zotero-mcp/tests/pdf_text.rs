@@ -1,13 +1,15 @@
 mod fixtures;
-use zotero_mcp::core::reader::pool::ReadOnlyPool;
 use zotero_mcp::core::pdf::{get_pdf_text, PdfEngines, PdfTextSource};
+use zotero_mcp::core::reader::pool::ReadOnlyPool;
 
 #[tokio::test]
 async fn prefers_zotero_ft_cache_when_present() {
     let f = fixtures::build_fixture::build();
     let pool = ReadOnlyPool::new(f.sqlite_path(), 2).await.unwrap();
     let engines = PdfEngines::build(&zotero_mcp::core::config::Config::default().zotero);
-    let res = get_pdf_text(&pool, "AAAA0001", 1, &f.storage_dir(), &engines).await.unwrap();
+    let res = get_pdf_text(&pool, "AAAA0001", 1, &f.storage_dir(), &engines)
+        .await
+        .unwrap();
     assert!(matches!(res.source, PdfTextSource::ZoteroCache));
     assert!(res.text.contains("zoteroconnectortest"));
 }
@@ -27,9 +29,11 @@ async fn pdftotext_engine_extracts_text_from_hello_pdf() {
         eprintln!("pdftotext not on PATH; skipping integration test");
         return;
     };
-    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/hello.pdf");
-    assert!(fixture.exists(), "hello.pdf fixture missing — run tests/fixtures/gen_pdfs.py");
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/hello.pdf");
+    assert!(
+        fixture.exists(),
+        "hello.pdf fixture missing — run tests/fixtures/gen_pdfs.py"
+    );
 
     let eng = PdftotextEngine::new(bin);
     let text = eng.extract(&fixture).await.expect("extraction succeeded");
@@ -42,8 +46,7 @@ async fn pdftotext_engine_returns_timeout_when_deadline_exceeded() {
         eprintln!("pdftotext not on PATH; skipping integration test");
         return;
     };
-    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/hello.pdf");
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/hello.pdf");
 
     // 1 ns is unreachable; the timer fires before pdftotext can even spawn-and-exit.
     let eng = PdftotextEngine::with_timeout(bin, Duration::from_nanos(1));

@@ -61,13 +61,13 @@ async fn live_create_item_attach_file_attach_link_roundtrip() {
         "date": "2026-01-01",
         "tags": [{ "tag": "_zotero-mcp-test" }]
     });
-    let (parent_key, _version) =
-        create_item(&api, &item, &[collection_key.clone()]).await.unwrap();
+    let (parent_key, _version) = create_item(&api, &item, &[collection_key.clone()])
+        .await
+        .unwrap();
     println!("created parent: {parent_key}");
 
     // Step 2: attach_file (imported_file). Uses the committed hello.pdf fixture.
-    let fixture =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/hello.pdf");
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/hello.pdf");
     let opts = AttachFileOptions {
         mode: AttachmentMode::ImportedFile,
         linked_attachment_base_dir: None,
@@ -75,7 +75,9 @@ async fn live_create_item_attach_file_attach_link_roundtrip() {
         filename: None,
         content_type: None,
     };
-    let attach_key = attach_file(&api, &parent_key, &fixture, &opts).await.unwrap();
+    let attach_key = attach_file(&api, &parent_key, &fixture, &opts)
+        .await
+        .unwrap();
     println!("attached file: {attach_key}");
 
     // Step 3: attach_link.
@@ -156,10 +158,9 @@ async fn live_attach_file_linked_file_roundtrip() {
     let sub = dir.path().join("papers");
     std::fs::create_dir_all(&sub).unwrap();
     let pdf_path = sub.join("linked-test.pdf");
-    let hello = std::fs::read(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/hello.pdf"),
-    )
-    .unwrap();
+    let hello =
+        std::fs::read(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/hello.pdf"))
+            .unwrap();
     std::fs::write(&pdf_path, &hello).unwrap();
 
     // Step 1: parent.
@@ -176,8 +177,9 @@ async fn live_attach_file_linked_file_roundtrip() {
         "DOI": unique,
         "tags": [{ "tag": "_zotero-mcp-test" }]
     });
-    let (parent_key, _) =
-        create_item(&api, &item, &[collection_key.clone()]).await.unwrap();
+    let (parent_key, _) = create_item(&api, &item, &[collection_key.clone()])
+        .await
+        .unwrap();
 
     // Step 2: linked_file attach.
     let opts = AttachFileOptions {
@@ -187,7 +189,9 @@ async fn live_attach_file_linked_file_roundtrip() {
         filename: None,
         content_type: None,
     };
-    let attach_key = attach_file(&api, &parent_key, &pdf_path, &opts).await.unwrap();
+    let attach_key = attach_file(&api, &parent_key, &pdf_path, &opts)
+        .await
+        .unwrap();
     println!("linked attachment: {attach_key}");
 
     // Roundtrip: read the attachment item back via the Web API and verify the
@@ -201,10 +205,7 @@ async fn live_attach_file_linked_file_roundtrip() {
         .header("Zotero-API-Version", "3")
         .header(
             "Authorization",
-            format!(
-                "Bearer {}",
-                env::var("ZOTERO_MCP_LIVE_API_KEY").unwrap()
-            ),
+            format!("Bearer {}", env::var("ZOTERO_MCP_LIVE_API_KEY").unwrap()),
         )
         .send()
         .await

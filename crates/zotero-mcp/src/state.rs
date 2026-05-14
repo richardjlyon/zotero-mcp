@@ -1,4 +1,3 @@
-use std::sync::Arc;
 use crate::core::bbt::BbtClient;
 use crate::core::cache::DiskCache;
 use crate::core::config::Config;
@@ -8,6 +7,7 @@ use crate::core::enrichment::openlibrary::OpenLibraryClient;
 use crate::core::enrichment::semantic_scholar::SemanticScholarClient;
 use crate::core::reader::pool::ReadOnlyPool;
 use crate::core::writer::client::LocalApi;
+use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -80,7 +80,11 @@ async fn detect_user_id(pool: &ReadOnlyPool, base: &str) -> anyhow::Result<i64> 
     // whether Zotero is running or not and doesn't depend on the Local API
     // exposing a `whoami` endpoint.
     let from_db = pool
-        .with_conn(|c| c.query_row("SELECT userID FROM users LIMIT 1", [], |r| r.get::<_, i64>(0)))
+        .with_conn(|c| {
+            c.query_row("SELECT userID FROM users LIMIT 1", [], |r| {
+                r.get::<_, i64>(0)
+            })
+        })
         .await
         .ok();
     if let Some(id) = from_db {

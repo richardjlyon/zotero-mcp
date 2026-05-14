@@ -1,6 +1,6 @@
 use crate::core::cache::DiskCache;
-use crate::core::error::{Error, Result};
 use crate::core::enrichment::NormalizedRecord;
+use crate::core::error::{Error, Result};
 use crate::core::types::Creator;
 use serde_json::{Map, Value};
 
@@ -13,8 +13,15 @@ pub struct OpenLibraryClient {
 
 impl OpenLibraryClient {
     pub fn new(base: impl Into<String>, cache: DiskCache, user_agent: &str) -> Self {
-        let http = reqwest::Client::builder().user_agent(user_agent).build().unwrap();
-        Self { base: base.into(), cache, http }
+        let http = reqwest::Client::builder()
+            .user_agent(user_agent)
+            .build()
+            .unwrap();
+        Self {
+            base: base.into(),
+            cache,
+            http,
+        }
     }
 
     pub async fn lookup_isbn(&self, isbn: &str) -> Result<NormalizedRecord> {
@@ -97,18 +104,30 @@ impl OpenLibraryClient {
 }
 
 const MONTHS: &[(&str, u32)] = &[
-    ("january", 1), ("jan", 1),
-    ("february", 2), ("feb", 2),
-    ("march", 3), ("mar", 3),
-    ("april", 4), ("apr", 4),
+    ("january", 1),
+    ("jan", 1),
+    ("february", 2),
+    ("feb", 2),
+    ("march", 3),
+    ("mar", 3),
+    ("april", 4),
+    ("apr", 4),
     ("may", 5),
-    ("june", 6), ("jun", 6),
-    ("july", 7), ("jul", 7),
-    ("august", 8), ("aug", 8),
-    ("september", 9), ("sept", 9), ("sep", 9),
-    ("october", 10), ("oct", 10),
-    ("november", 11), ("nov", 11),
-    ("december", 12), ("dec", 12),
+    ("june", 6),
+    ("jun", 6),
+    ("july", 7),
+    ("jul", 7),
+    ("august", 8),
+    ("aug", 8),
+    ("september", 9),
+    ("sept", 9),
+    ("sep", 9),
+    ("october", 10),
+    ("oct", 10),
+    ("november", 11),
+    ("nov", 11),
+    ("december", 12),
+    ("dec", 12),
 ];
 
 /// Parse OpenLibrary's freeform `publish_date` into ISO 8601 (YYYY-MM-DD,

@@ -30,7 +30,11 @@ async fn live_schema_and_search() {
     let hits = search_metadata(
         &pool,
         1,
-        SearchParams { query: "the".into(), limit: 3, ..Default::default() },
+        SearchParams {
+            query: "the".into(),
+            limit: 3,
+            ..Default::default()
+        },
     )
     .await
     .unwrap();

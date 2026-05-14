@@ -21,11 +21,14 @@ async fn patches_item_with_version_header() {
         .and(header("If-Unmodified-Since-Version", "10005"))
         .and(header("authorization", "Bearer test-key"))
         .respond_with(ResponseTemplate::new(204))
-        .mount(&server).await;
+        .mount(&server)
+        .await;
 
     let api = test_api(&server);
     let fields = serde_json::json!({ "abstractNote": "New abstract." });
-    update_item_fields(&api, "JGF2UTMW", 10005, fields).await.unwrap();
+    update_item_fields(&api, "JGF2UTMW", 10005, fields)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -33,9 +36,12 @@ async fn version_conflict_returns_typed_error() {
     let server = MockServer::start().await;
     Mock::given(method("PATCH"))
         .respond_with(ResponseTemplate::new(412).set_body_string("Precondition Failed"))
-        .mount(&server).await;
+        .mount(&server)
+        .await;
     let api = test_api(&server);
-    let err = update_item_fields(&api, "JGF2UTMW", 10005, serde_json::json!({})).await.unwrap_err();
+    let err = update_item_fields(&api, "JGF2UTMW", 10005, serde_json::json!({}))
+        .await
+        .unwrap_err();
     assert!(matches!(err, zotero_mcp::core::Error::VersionConflict(_)));
 }
 

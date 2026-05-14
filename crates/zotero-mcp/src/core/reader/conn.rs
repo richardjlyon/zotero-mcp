@@ -9,10 +9,7 @@ pub fn open_read_only(db: &Path) -> Result<Connection> {
     // without competing for filesystem locks. Each connection is short-lived
     // (one query per `with_conn` call), so re-opening picks up Zotero's latest
     // committed state.
-    let uri = format!(
-        "file:{}?mode=ro&nolock=1&immutable=1",
-        db.to_string_lossy()
-    );
+    let uri = format!("file:{}?mode=ro&nolock=1&immutable=1", db.to_string_lossy());
     let conn = Connection::open_with_flags(
         &uri,
         OpenFlags::SQLITE_OPEN_READ_ONLY

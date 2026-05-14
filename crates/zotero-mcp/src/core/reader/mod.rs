@@ -1,10 +1,10 @@
-pub mod conn;
-pub mod pool;
-pub mod items;
+pub mod annotations;
+pub mod attachments;
 pub mod collections;
-pub mod tags;
+pub mod conn;
+pub mod fulltext;
+pub mod items;
+pub mod pool;
 pub mod recent;
 pub mod search;
-pub mod fulltext;
-pub mod attachments;
-pub mod annotations;
+pub mod tags;

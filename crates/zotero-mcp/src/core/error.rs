@@ -83,7 +83,10 @@ pub enum Error {
          pdf-extract: {pdf_extract}. \
          pdftotext: {pdftotext}"
     )]
-    PdfAllEnginesFailed { pdf_extract: String, pdftotext: String },
+    PdfAllEnginesFailed {
+        pdf_extract: String,
+        pdftotext: String,
+    },
 
     #[error("html extraction failed: {0}")]
     Html(String),
@@ -119,7 +122,10 @@ mod tests {
 
     #[test]
     fn error_display_includes_context() {
-        let e = Error::SchemaMismatch { expected: "125..130".into(), found: 99 };
+        let e = Error::SchemaMismatch {
+            expected: "125..130".into(),
+            found: 99,
+        };
         let s = e.to_string();
         assert!(s.contains("125..130"));
         assert!(s.contains("99"));
@@ -183,7 +189,10 @@ mod tests {
 
     #[test]
     fn upload_failed_carries_stage_and_detail() {
-        let e = Error::UploadFailed { stage: "s3_put", detail: "connection reset".into() };
+        let e = Error::UploadFailed {
+            stage: "s3_put",
+            detail: "connection reset".into(),
+        };
         let s = e.to_string();
         assert!(s.contains("s3_put"));
         assert!(s.contains("connection reset"));

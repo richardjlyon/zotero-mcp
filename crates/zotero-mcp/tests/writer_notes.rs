@@ -16,9 +16,15 @@ async fn posts_a_child_note_against_parent() {
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "successful": { "0": { "key": "NEWN0001", "version": 12345 } }
         })))
-        .mount(&server).await;
+        .mount(&server)
+        .await;
 
-    let api = LocalApi::new("http://unused", 93338).unwrap().with_web_base(server.uri()).with_api_key("test-key");
-    let new_key = add_note(&api, "JGF2UTMW", "# Heading\n\nSome **markdown**.").await.unwrap();
+    let api = LocalApi::new("http://unused", 93338)
+        .unwrap()
+        .with_web_base(server.uri())
+        .with_api_key("test-key");
+    let new_key = add_note(&api, "JGF2UTMW", "# Heading\n\nSome **markdown**.")
+        .await
+        .unwrap();
     assert_eq!(new_key, "NEWN0001");
 }

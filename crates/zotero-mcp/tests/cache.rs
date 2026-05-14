@@ -6,7 +6,10 @@ async fn round_trips_json_with_ttl() {
     let dir = tempdir().unwrap();
     let cache = DiskCache::new(dir.path().to_path_buf(), 60 * 60);
     let key = "crossref:10.1/abc";
-    cache.put(key, &serde_json::json!({"title":"hello"})).await.unwrap();
+    cache
+        .put(key, &serde_json::json!({"title":"hello"}))
+        .await
+        .unwrap();
     let v: serde_json::Value = cache.get(key).await.unwrap().expect("hit");
     assert_eq!(v["title"], "hello");
 }

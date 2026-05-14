@@ -42,7 +42,10 @@ async fn handle_write_response(item_key: &str, resp: reqwest::Response) -> Resul
             "item {item_key} has changed; refresh and retry. body={body}"
         )));
     }
-    Err(Error::LocalApi { status: status.as_u16(), body })
+    Err(Error::LocalApi {
+        status: status.as_u16(),
+        body,
+    })
 }
 
 /// Create a new Zotero item.
@@ -117,9 +120,6 @@ pub async fn create_item(
             body: v.to_string(),
         })?
         .to_string();
-    let version = entry
-        .get("version")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(0);
+    let version = entry.get("version").and_then(|v| v.as_i64()).unwrap_or(0);
     Ok((key, version))
 }

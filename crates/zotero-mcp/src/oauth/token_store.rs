@@ -128,8 +128,7 @@ impl TokenStore {
             Ok(bytes) => match serde_json::from_slice::<Snapshot>(&bytes) {
                 Ok(snap) if snap.version == SCHEMA_VERSION => snap,
                 Ok(_) | Err(_) => {
-                    let backup =
-                        path.with_extension(format!("json.broken-{}", unix_now()));
+                    let backup = path.with_extension(format!("json.broken-{}", unix_now()));
                     if let Err(e) = std::fs::rename(&path, &backup) {
                         tracing::warn!(
                             path = %path.display(),
@@ -179,7 +178,9 @@ impl TokenStore {
             index.access_by_hash.insert(r.token_hash.clone(), r.clone());
         }
         for r in &snapshot.refresh {
-            index.refresh_by_hash.insert(r.token_hash.clone(), r.clone());
+            index
+                .refresh_by_hash
+                .insert(r.token_hash.clone(), r.clone());
         }
         for c in &snapshot.revoked_chains {
             index.revoked.insert(c.clone());
@@ -201,10 +202,7 @@ impl TokenStore {
     /// continue an existing chain (use case: `refresh_token` grant rotation).
     /// Persists to disk before returning. On persist failure logs an error and
     /// keeps the in-memory state — the caller still gets a valid pair.
-    pub async fn mint_pair(
-        &self,
-        chain_id: Option<ChainId>,
-    ) -> anyhow::Result<MintedPair> {
+    pub async fn mint_pair(&self, chain_id: Option<ChainId>) -> anyhow::Result<MintedPair> {
         let chain_id = chain_id.unwrap_or_else(opaque_id);
         let access_token = opaque_id();
         let refresh_token = opaque_id();
@@ -223,8 +221,10 @@ impl TokenStore {
 
         {
             let mut idx = self.inner.state.write().await;
-            idx.access_by_hash.insert(access_record.token_hash.clone(), access_record);
-            idx.refresh_by_hash.insert(refresh_record.token_hash.clone(), refresh_record);
+            idx.access_by_hash
+                .insert(access_record.token_hash.clone(), access_record);
+            idx.refresh_by_hash
+                .insert(refresh_record.token_hash.clone(), refresh_record);
             self.persist_locked(&idx);
         }
 
@@ -385,13 +385,18 @@ mod tests {
             Duration::from_secs(600),
         )
         .unwrap();
-        assert!(!path.exists(), "original corrupt file should have been moved aside");
+        assert!(
+            !path.exists(),
+            "original corrupt file should have been moved aside"
+        );
         let entries: Vec<_> = std::fs::read_dir(dir.path())
             .unwrap()
             .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
             .collect();
         assert!(
-            entries.iter().any(|name| name.starts_with("tokens.json.broken-")),
+            entries
+                .iter()
+                .any(|name| name.starts_with("tokens.json.broken-")),
             "expected backup file, got {entries:?}"
         );
     }
@@ -421,7 +426,10 @@ mod tests {
         )
         .unwrap();
         let idx = store.inner.state.try_read().unwrap();
-        assert!(idx.access_by_hash.is_empty(), "tokens issued under old client_id must be wiped");
+        assert!(
+            idx.access_by_hash.is_empty(),
+            "tokens issued under old client_id must be wiped"
+        );
     }
 
     #[test]
@@ -532,10 +540,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let store = fresh(&dir);
         let first = store.mint_pair(None).await.unwrap();
-        let second = store
-            .mint_pair(Some(first.chain_id.clone()))
-            .await
-            .unwrap();
+        let second = store.mint_pair(Some(first.chain_id.clone())).await.unwrap();
         assert_eq!(first.chain_id, second.chain_id);
         assert_ne!(first.access_token, second.access_token);
     }
@@ -561,7 +566,7 @@ mod tests {
         let store = TokenStore::load(
             dir.path().join("tokens.json"),
             "client-id-1",
-            Duration::from_secs(0),    // immediate expiry
+            Duration::from_secs(0), // immediate expiry
             Duration::from_secs(600),
         )
         .unwrap();
@@ -586,7 +591,10 @@ mod tests {
         let store = fresh(&dir);
         let pair = store.mint_pair(None).await.unwrap();
         let _first = store.consume_refresh(&pair.refresh_token).await.unwrap();
-        let err = store.consume_refresh(&pair.refresh_token).await.unwrap_err();
+        let err = store
+            .consume_refresh(&pair.refresh_token)
+            .await
+            .unwrap_err();
         match err {
             RefreshError::Replayed(chain) => assert_eq!(chain, pair.chain_id),
             other => panic!("expected Replayed, got {other:?}"),
@@ -608,12 +616,15 @@ mod tests {
             dir.path().join("tokens.json"),
             "client-id-1",
             Duration::from_secs(60),
-            Duration::from_secs(0),    // refresh expires immediately
+            Duration::from_secs(0), // refresh expires immediately
         )
         .unwrap();
         let pair = store.mint_pair(None).await.unwrap();
         tokio::time::sleep(Duration::from_secs(1)).await;
-        let err = store.consume_refresh(&pair.refresh_token).await.unwrap_err();
+        let err = store
+            .consume_refresh(&pair.refresh_token)
+            .await
+            .unwrap_err();
         assert!(matches!(err, RefreshError::Expired), "got {err:?}");
     }
 
@@ -633,7 +644,10 @@ mod tests {
         let store = fresh(&dir);
         let pair = store.mint_pair(None).await.unwrap();
         store.revoke_chain(pair.chain_id.clone()).await;
-        let err = store.consume_refresh(&pair.refresh_token).await.unwrap_err();
+        let err = store
+            .consume_refresh(&pair.refresh_token)
+            .await
+            .unwrap_err();
         // Replay would be wrong — the token was never consumed; correct error
         // is that the chain is revoked. We treat that as Unknown for the caller
         // (no point telling the world which chain). Adjust below if needed.
@@ -669,7 +683,8 @@ mod tests {
         };
 
         let access_token = {
-            let state_a = OAuthState::with_tokens_path(config.clone(), tokens_path.clone()).unwrap();
+            let state_a =
+                OAuthState::with_tokens_path(config.clone(), tokens_path.clone()).unwrap();
             let pair = state_a.token_store().mint_pair(None).await.unwrap();
             assert!(state_a.validate_token(&pair.access_token).await);
             pair.access_token

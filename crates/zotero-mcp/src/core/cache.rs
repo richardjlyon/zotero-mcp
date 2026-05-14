@@ -11,7 +11,10 @@ pub struct DiskCache {
 
 impl DiskCache {
     pub fn new(dir: PathBuf, ttl_secs: u64) -> Self {
-        Self { dir, ttl: Duration::from_secs(ttl_secs) }
+        Self {
+            dir,
+            ttl: Duration::from_secs(ttl_secs),
+        }
     }
 
     fn path_for(&self, key: &str) -> PathBuf {
@@ -36,7 +39,10 @@ impl DiskCache {
 
     pub async fn put<T: Serialize>(&self, key: &str, value: &T) -> Result<()> {
         tokio::fs::create_dir_all(&self.dir).await.ok();
-        let env = Envelope { stored_at: now_secs(), value: serde_json::to_value(value)? };
+        let env = Envelope {
+            stored_at: now_secs(),
+            value: serde_json::to_value(value)?,
+        };
         let bytes = serde_json::to_vec(&env)?;
         let p = self.path_for(key);
         let tmp = p.with_extension("json.tmp");

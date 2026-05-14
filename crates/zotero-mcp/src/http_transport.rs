@@ -109,10 +109,8 @@ mod tests {
     use tower::ServiceExt;
 
     fn test_oauth_state() -> OAuthState {
-        let dir = std::env::temp_dir().join(format!(
-            "zotero-mcp-http-test-{}",
-            rand::random::<u64>()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("zotero-mcp-http-test-{}", rand::random::<u64>()));
         std::fs::create_dir_all(&dir).unwrap();
         OAuthState::with_tokens_path(
             OAuthConfig {
@@ -147,10 +145,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-        assert!(
-            resp.headers()
-                .get(axum::http::header::WWW_AUTHENTICATE)
-                .is_some()
-        );
+        assert!(resp
+            .headers()
+            .get(axum::http::header::WWW_AUTHENTICATE)
+            .is_some());
     }
 }

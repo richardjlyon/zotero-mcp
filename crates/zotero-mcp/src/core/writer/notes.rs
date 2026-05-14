@@ -29,14 +29,20 @@ pub async fn add_note(api: &LocalApi, parent_key: &str, markdown_or_html: &str) 
     let status = resp.status();
     let v: Value = resp.json().await?;
     if !status.is_success() {
-        return Err(Error::LocalApi { status: status.as_u16(), body: v.to_string() });
+        return Err(Error::LocalApi {
+            status: status.as_u16(),
+            body: v.to_string(),
+        });
     }
     v.get("successful")
         .and_then(|s| s.get("0"))
         .and_then(|i| i.get("key"))
         .and_then(|k| k.as_str())
         .map(|s| s.to_string())
-        .ok_or_else(|| Error::LocalApi { status: 200, body: v.to_string() })
+        .ok_or_else(|| Error::LocalApi {
+            status: 200,
+            body: v.to_string(),
+        })
 }
 
 fn markdown_to_simple_html(md: &str) -> String {
@@ -44,7 +50,9 @@ fn markdown_to_simple_html(md: &str) -> String {
     let mut out = String::new();
     for para in md.split("\n\n") {
         let p = para.trim();
-        if p.is_empty() { continue; }
+        if p.is_empty() {
+            continue;
+        }
         if let Some(rest) = p.strip_prefix("### ") {
             out.push_str(&format!("<h3>{}</h3>", html_escape(rest)));
         } else if let Some(rest) = p.strip_prefix("## ") {
@@ -70,7 +78,10 @@ fn regex_lite_replace(s: &str, delim: &str, open: &str, close: &str) -> String {
     let mut rest = s;
     loop {
         match rest.find(delim) {
-            None => { out.push_str(rest); return out; }
+            None => {
+                out.push_str(rest);
+                return out;
+            }
             Some(a) => {
                 out.push_str(&rest[..a]);
                 let after = &rest[a + delim.len()..];
@@ -81,7 +92,11 @@ fn regex_lite_replace(s: &str, delim: &str, open: &str, close: &str) -> String {
                         out.push_str(close);
                         rest = &after[b + delim.len()..];
                     }
-                    None => { out.push_str(delim); out.push_str(after); return out; }
+                    None => {
+                        out.push_str(delim);
+                        out.push_str(after);
+                        return out;
+                    }
                 }
             }
         }
@@ -89,5 +104,7 @@ fn regex_lite_replace(s: &str, delim: &str, open: &str, close: &str) -> String {
 }
 
 fn html_escape(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }

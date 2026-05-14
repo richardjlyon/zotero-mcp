@@ -1,6 +1,6 @@
+use tempfile::tempdir;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
-use tempfile::tempdir;
 use zotero_mcp::core::cache::DiskCache;
 use zotero_mcp::core::enrichment::arxiv::ArxivClient;
 use zotero_mcp::core::enrichment::normalized_to_item;
@@ -20,11 +20,17 @@ const SAMPLE_ATOM: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 #[tokio::test]
 async fn lookup_arxiv_parses_atom() {
     let server = MockServer::start().await;
-    Mock::given(method("GET")).and(path("/api/query"))
+    Mock::given(method("GET"))
+        .and(path("/api/query"))
         .respond_with(ResponseTemplate::new(200).set_body_string(SAMPLE_ATOM))
-        .mount(&server).await;
+        .mount(&server)
+        .await;
     let dir = tempdir().unwrap();
-    let c = ArxivClient::new(server.uri(), DiskCache::new(dir.path().to_path_buf(), 60), "test/0.1");
+    let c = ArxivClient::new(
+        server.uri(),
+        DiskCache::new(dir.path().to_path_buf(), 60),
+        "test/0.1",
+    );
     let r = c.lookup_arxiv("2401.00001").await.unwrap();
 
     // Envelope assertions.

@@ -18,7 +18,9 @@ pub async fn search_metadata(
     library_id: i64,
     mut params: SearchParams,
 ) -> Result<Vec<SearchHit>> {
-    if params.limit <= 0 { params.limit = 50; }
+    if params.limit <= 0 {
+        params.limit = 50;
+    }
 
     pool.with_conn(move |c| {
         let q = params.query.trim();

@@ -27,9 +27,7 @@ pub struct LocalApi {
 
 impl LocalApi {
     pub fn new(local_base: impl Into<String>, user_id: i64) -> Result<Self> {
-        let http = Client::builder()
-            .timeout(Duration::from_secs(10))
-            .build()?;
+        let http = Client::builder().timeout(Duration::from_secs(10)).build()?;
         Ok(Self {
             local_base: local_base.into(),
             web_base: "https://api.zotero.org".into(),
@@ -91,7 +89,10 @@ impl LocalApi {
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
-            return Err(Error::LocalApi { status: status.as_u16(), body });
+            return Err(Error::LocalApi {
+                status: status.as_u16(),
+                body,
+            });
         }
         Ok(resp.json().await?)
     }

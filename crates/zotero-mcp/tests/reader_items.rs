@@ -1,6 +1,6 @@
 mod fixtures;
-use zotero_mcp::core::reader::pool::ReadOnlyPool;
 use zotero_mcp::core::reader::items::get_item_by_key;
+use zotero_mcp::core::reader::pool::ReadOnlyPool;
 
 #[tokio::test]
 async fn fetches_item_with_fields_and_creators() {

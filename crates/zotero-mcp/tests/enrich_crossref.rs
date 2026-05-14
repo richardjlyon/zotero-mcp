@@ -1,6 +1,6 @@
+use tempfile::tempdir;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
-use tempfile::tempdir;
 use zotero_mcp::core::cache::DiskCache;
 use zotero_mcp::core::enrichment::crossref::CrossrefClient;
 use zotero_mcp::core::enrichment::normalized_to_item;
@@ -8,7 +8,8 @@ use zotero_mcp::core::enrichment::normalized_to_item;
 #[tokio::test]
 async fn lookup_doi_normalizes_to_zotero_fields() {
     let server = MockServer::start().await;
-    Mock::given(method("GET")).and(path("/works/10.1234/abcd"))
+    Mock::given(method("GET"))
+        .and(path("/works/10.1234/abcd"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "status": "ok",
             "message": {
@@ -23,7 +24,8 @@ async fn lookup_doi_normalizes_to_zotero_fields() {
                 "abstract": "Abstract content."
             }
         })))
-        .mount(&server).await;
+        .mount(&server)
+        .await;
 
     let dir = tempdir().unwrap();
     let cache = DiskCache::new(dir.path().to_path_buf(), 60);

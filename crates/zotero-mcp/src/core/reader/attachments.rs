@@ -16,11 +16,13 @@ pub async fn list_attachments(
     let storage_dir = storage_dir.to_path_buf();
 
     pool.with_conn(move |c| {
-        let parent_id: Option<i64> = c.query_row(
-            "SELECT itemID FROM items WHERE libraryID = ? AND key = ?",
-            rusqlite::params![library_id, &parent_key],
-            |r| r.get(0),
-        ).ok();
+        let parent_id: Option<i64> = c
+            .query_row(
+                "SELECT itemID FROM items WHERE libraryID = ? AND key = ?",
+                rusqlite::params![library_id, &parent_key],
+                |r| r.get(0),
+            )
+            .ok();
         let parent_id = match parent_id {
             Some(id) => id,
             None => return Ok(vec![]),
@@ -30,7 +32,7 @@ pub async fn list_attachments(
         let mut stmt = c.prepare(
             "SELECT i.key, a.linkMode, a.contentType, a.path
              FROM itemAttachments a JOIN items i ON i.itemID = a.itemID
-             WHERE a.parentItemID = ? AND i.libraryID = ?"
+             WHERE a.parentItemID = ? AND i.libraryID = ?",
         )?;
         let mut rows = stmt.query(rusqlite::params![parent_id, library_id])?;
         while let Some(r) = rows.next()? {
@@ -38,7 +40,8 @@ pub async fn list_attachments(
             let link_mode = AttachmentLinkMode::from_i64(r.get(1)?);
             let content_type: Option<String> = r.get(2)?;
             let path_raw: Option<String> = r.get(3)?;
-            let (filename, absolute_path) = resolve_filename(&storage_dir, &key, path_raw.as_deref(), link_mode);
+            let (filename, absolute_path) =
+                resolve_filename(&storage_dir, &key, path_raw.as_deref(), link_mode);
             out.push(Attachment {
                 key,
                 parent_key: Some(parent_key.clone()),
@@ -49,7 +52,8 @@ pub async fn list_attachments(
             });
         }
         Ok(out)
-    }).await
+    })
+    .await
 }
 
 /// Returns the absolute path to the (first, preferred) attachment of an item.
@@ -61,10 +65,17 @@ pub async fn resolve_path(
 ) -> Result<PathBuf> {
     let atts = list_attachments(pool, parent_key, library_id, storage_dir).await?;
     // Prefer PDFs first, then HTML snapshots
-    let chosen = atts.iter().find(|a| a.content_type.as_deref() == Some("application/pdf"))
-        .or_else(|| atts.iter().find(|a| a.content_type.as_deref() == Some("text/html")))
+    let chosen = atts
+        .iter()
+        .find(|a| a.content_type.as_deref() == Some("application/pdf"))
+        .or_else(|| {
+            atts.iter()
+                .find(|a| a.content_type.as_deref() == Some("text/html"))
+        })
         .ok_or_else(|| Error::AttachmentNotFound(parent_key.to_string()))?;
-    chosen.absolute_path.as_ref()
+    chosen
+        .absolute_path
+        .as_ref()
         .map(PathBuf::from)
         .ok_or_else(|| Error::AttachmentNotFound(parent_key.to_string()))
 }

@@ -2,14 +2,18 @@ use crate::core::error::Result;
 use crate::core::reader::pool::ReadOnlyPool;
 use crate::core::types::Collection;
 
-pub async fn list(pool: &ReadOnlyPool, library_id: i64, parent: Option<String>) -> Result<Vec<Collection>> {
+pub async fn list(
+    pool: &ReadOnlyPool,
+    library_id: i64,
+    parent: Option<String>,
+) -> Result<Vec<Collection>> {
     pool.with_conn(move |c| {
         let mut out = vec![];
         let mut sql = String::from(
             "SELECT c.key, c.libraryID, c.collectionName, p.key
              FROM collections c
              LEFT JOIN collections p ON p.collectionID = c.parentCollectionID
-             WHERE c.libraryID = ?"
+             WHERE c.libraryID = ?",
         );
         if parent.is_some() {
             sql.push_str(" AND p.key = ?");
@@ -30,5 +34,6 @@ pub async fn list(pool: &ReadOnlyPool, library_id: i64, parent: Option<String>) 
             });
         }
         Ok(out)
-    }).await
+    })
+    .await
 }

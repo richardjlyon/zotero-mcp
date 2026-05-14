@@ -133,7 +133,9 @@ pub async fn run_status() -> anyhow::Result<()> {
         println!("  [OK]   Zotero local API responding on 127.0.0.1:23119");
     } else {
         println!("  [FAIL] no listener on 127.0.0.1:23119 (Zotero closed, or local API disabled)");
-        println!("         fix: open Zotero → Preferences → Advanced → \"Allow other applications…\"");
+        println!(
+            "         fix: open Zotero → Preferences → Advanced → \"Allow other applications…\""
+        );
         all_ok = false;
     }
 
@@ -214,7 +216,9 @@ fn parse_tailscale_dns_name(stdout: &[u8]) -> anyhow::Result<String> {
 }
 
 fn launchd_plist_path() -> anyhow::Result<PathBuf> {
-    Ok(home_dir()?.join("Library/LaunchAgents").join(format!("{PLIST_LABEL}.plist")))
+    Ok(home_dir()?
+        .join("Library/LaunchAgents")
+        .join(format!("{PLIST_LABEL}.plist")))
 }
 
 fn home_dir() -> anyhow::Result<PathBuf> {
@@ -324,8 +328,7 @@ fn wait_for_file(path: &Path, timeout: Duration) -> anyhow::Result<()> {
 }
 
 fn read_oauth(path: &Path) -> anyhow::Result<oauth::OAuthConfig> {
-    let bytes = std::fs::read(path)
-        .map_err(|e| anyhow::anyhow!("read {}: {e}", path.display()))?;
+    let bytes = std::fs::read(path).map_err(|e| anyhow::anyhow!("read {}: {e}", path.display()))?;
     let cfg: oauth::OAuthConfig = toml::from_str(std::str::from_utf8(&bytes)?)?;
     Ok(cfg)
 }
@@ -364,10 +367,7 @@ fn tailscale_funnel_active(port: u16) -> anyhow::Result<bool> {
         .output()
         .map_err(|e| anyhow::anyhow!("running `tailscale funnel status`: {e}"))?;
     if !out.status.success() {
-        anyhow::bail!(
-            "`tailscale funnel status` exited {}",
-            out.status
-        );
+        anyhow::bail!("`tailscale funnel status` exited {}", out.status);
     }
     let stdout = String::from_utf8_lossy(&out.stdout);
     // Output mentions the port number when something is being served on it.
@@ -409,7 +409,10 @@ mod tests {
     #[test]
     fn parses_dns_name_without_trailing_dot() {
         let json = br#"{ "Self": { "DNSName": "machine.tail-net.ts.net", "HostName": "x" } }"#;
-        assert_eq!(parse_tailscale_dns_name(json).unwrap(), "machine.tail-net.ts.net");
+        assert_eq!(
+            parse_tailscale_dns_name(json).unwrap(),
+            "machine.tail-net.ts.net"
+        );
     }
 
     #[test]

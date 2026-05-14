@@ -72,7 +72,9 @@ async fn surfaces_zotero_400_as_localapi_error() {
         .await;
 
     let item = json!({ "itemType": "nonsense" });
-    let err = create_item(&api(&server.uri()), &item, &[]).await.unwrap_err();
+    let err = create_item(&api(&server.uri()), &item, &[])
+        .await
+        .unwrap_err();
     match err {
         Error::LocalApi { status, body } => {
             assert_eq!(status, 400);

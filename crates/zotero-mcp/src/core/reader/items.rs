@@ -139,7 +139,9 @@ pub async fn get_item_by_key(pool: &ReadOnlyPool, key: &str, library_id: i64) ->
 }
 
 pub async fn hydrate_citation_key(item: &mut Item, bbt: Option<&BbtClient>) {
-    if item.citation_key.is_some() { return; }
+    if item.citation_key.is_some() {
+        return;
+    }
     let Some(client) = bbt else { return };
     if let Ok(map) = client.citationkeys(&[item.key.clone()]).await {
         if let Some(ck) = map.get(&item.key) {
@@ -164,10 +166,16 @@ fn strip_zotero_date_prefix(value: &str) -> String {
         return value.to_string();
     }
     let is_digit = |i: usize| bytes[i].is_ascii_digit();
-    let dashes_match =
-        bytes[4] == b'-' && bytes[7] == b'-' &&
-        is_digit(0) && is_digit(1) && is_digit(2) && is_digit(3) &&
-        is_digit(5) && is_digit(6) && is_digit(8) && is_digit(9);
+    let dashes_match = bytes[4] == b'-'
+        && bytes[7] == b'-'
+        && is_digit(0)
+        && is_digit(1)
+        && is_digit(2)
+        && is_digit(3)
+        && is_digit(5)
+        && is_digit(6)
+        && is_digit(8)
+        && is_digit(9);
     if !dashes_match {
         return value.to_string();
     }
@@ -208,7 +216,10 @@ mod tests {
     fn leaves_non_date_values_alone() {
         assert_eq!(strip_zotero_date_prefix("On Bullshit"), "On Bullshit");
         assert_eq!(strip_zotero_date_prefix(""), "");
-        assert_eq!(strip_zotero_date_prefix("10.1126/science.1228026"), "10.1126/science.1228026");
+        assert_eq!(
+            strip_zotero_date_prefix("10.1126/science.1228026"),
+            "10.1126/science.1228026"
+        );
         // Same length as prefix (11) but not the right shape:
         assert_eq!(strip_zotero_date_prefix("foo bar baz"), "foo bar baz");
     }

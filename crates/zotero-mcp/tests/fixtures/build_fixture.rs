@@ -31,12 +31,14 @@ pub fn build() -> Fixture {
     std::fs::write(
         storage.join("AAAA0001").join(".zotero-ft-cache"),
         b"Cached extracted text of the paper containing keyword zoteroconnectortest.",
-    ).unwrap();
+    )
+    .unwrap();
     std::fs::create_dir_all(storage.join("BBBB0002")).unwrap();
     std::fs::write(
         storage.join("BBBB0002").join("article.html"),
         b"<html><body><article><h1>An Article</h1><p>Hello snapshot.</p></article></body></html>",
-    ).unwrap();
+    )
+    .unwrap();
 
     Fixture { dir }
 }
@@ -105,46 +107,100 @@ fn create_schema(c: &Connection) {
 }
 
 fn insert_minimal_data(c: &Connection) {
-    c.execute("INSERT INTO version(schema, version) VALUES ('userdata', 125)", []).unwrap();
-    c.execute("INSERT INTO libraries(libraryID) VALUES (1)", []).unwrap();
+    c.execute(
+        "INSERT INTO version(schema, version) VALUES ('userdata', 125)",
+        [],
+    )
+    .unwrap();
+    c.execute("INSERT INTO libraries(libraryID) VALUES (1)", [])
+        .unwrap();
     c.execute("INSERT INTO itemTypes(itemTypeID, typeName) VALUES (2, 'book'), (4, 'journalArticle'), (14, 'webpage'), (3, 'attachment'), (12, 'note'), (37, 'annotation')", []).unwrap();
     c.execute("INSERT INTO fields(fieldID, fieldName) VALUES (1, 'title'), (3, 'date'), (4, 'publisher'), (52, 'DOI'), (60, 'url'), (90, 'abstractNote')", []).unwrap();
     c.execute("INSERT INTO fieldsCombined(fieldID, fieldName) VALUES (1, 'title'), (3, 'date'), (4, 'publisher'), (52, 'DOI'), (60, 'url'), (90, 'abstractNote')", []).unwrap();
-    c.execute("INSERT INTO creatorTypes(creatorTypeID, creatorType) VALUES (1, 'author'), (2, 'editor')", []).unwrap();
+    c.execute(
+        "INSERT INTO creatorTypes(creatorTypeID, creatorType) VALUES (1, 'author'), (2, 'editor')",
+        [],
+    )
+    .unwrap();
 
     // Item 1: a book "What is Modern Israel?" by Yakob Rabkin
     c.execute("INSERT INTO items VALUES (1, 2, '2026-05-01 00:00:00', '2026-05-01 00:00:00', '2026-05-01 00:00:00', 1, 'JGF2UTMW', 10005, 0)", []).unwrap();
     c.execute("INSERT INTO itemDataValues VALUES (1, 'What is Modern Israel?'), (2, '2016'), (3, 'Pluto Press')", []).unwrap();
-    c.execute("INSERT INTO itemData VALUES (1, 1, 1), (1, 3, 2), (1, 4, 3)", []).unwrap();
-    c.execute("INSERT INTO creators VALUES (1, 'Yakob', 'Rabkin', 0)", []).unwrap();
-    c.execute("INSERT INTO itemCreators VALUES (1, 1, 1, 0)", []).unwrap();
+    c.execute(
+        "INSERT INTO itemData VALUES (1, 1, 1), (1, 3, 2), (1, 4, 3)",
+        [],
+    )
+    .unwrap();
+    c.execute("INSERT INTO creators VALUES (1, 'Yakob', 'Rabkin', 0)", [])
+        .unwrap();
+    c.execute("INSERT INTO itemCreators VALUES (1, 1, 1, 0)", [])
+        .unwrap();
 
     // Item 2: a journal article with a PDF attachment that has cached full text
     c.execute("INSERT INTO items VALUES (2, 4, '2026-05-02 00:00:00', '2026-05-02 00:00:00', '2026-05-02 00:00:00', 1, 'AAAA0001', 11, 0)", []).unwrap();
     c.execute("INSERT INTO itemDataValues VALUES (10, 'A Paper on Things'), (11, '2024'), (12, '10.1234/abcd')", []).unwrap();
-    c.execute("INSERT INTO itemData VALUES (2, 1, 10), (2, 3, 11), (2, 52, 12)", []).unwrap();
+    c.execute(
+        "INSERT INTO itemData VALUES (2, 1, 10), (2, 3, 11), (2, 52, 12)",
+        [],
+    )
+    .unwrap();
 
     // Attachment row for item 2 (item ID 3, key "AAAA0001" so storage dir matches)
     c.execute("INSERT INTO items VALUES (3, 3, '2026-05-02 00:00:00', '2026-05-02 00:00:00', '2026-05-02 00:00:00', 1, 'AAAA0001', 12, 0)", []).unwrap();
-    c.execute("INSERT INTO itemAttachments VALUES (3, 2, 0, 'application/pdf', 'storage:paper.pdf', 0)", []).unwrap();
+    c.execute(
+        "INSERT INTO itemAttachments VALUES (3, 2, 0, 'application/pdf', 'storage:paper.pdf', 0)",
+        [],
+    )
+    .unwrap();
 
     // Item 4: a webpage item with HTML snapshot
     c.execute("INSERT INTO items VALUES (4, 14, '2026-05-03 00:00:00', '2026-05-03 00:00:00', '2026-05-03 00:00:00', 1, 'WEB00001', 5, 0)", []).unwrap();
-    c.execute("INSERT INTO itemDataValues VALUES (20, 'An Article'), (21, 'https://example.com/article')", []).unwrap();
-    c.execute("INSERT INTO itemData VALUES (4, 1, 20), (4, 60, 21)", []).unwrap();
+    c.execute(
+        "INSERT INTO itemDataValues VALUES (20, 'An Article'), (21, 'https://example.com/article')",
+        [],
+    )
+    .unwrap();
+    c.execute("INSERT INTO itemData VALUES (4, 1, 20), (4, 60, 21)", [])
+        .unwrap();
     c.execute("INSERT INTO items VALUES (5, 3, '2026-05-03 00:00:00', '2026-05-03 00:00:00', '2026-05-03 00:00:00', 1, 'BBBB0002', 6, 0)", []).unwrap();
-    c.execute("INSERT INTO itemAttachments VALUES (5, 4, 1, 'text/html', 'storage:article.html', 0)", []).unwrap();
+    c.execute(
+        "INSERT INTO itemAttachments VALUES (5, 4, 1, 'text/html', 'storage:article.html', 0)",
+        [],
+    )
+    .unwrap();
 
     // Collection and tag
-    c.execute("INSERT INTO collections VALUES (1, 'Reading List', NULL, 1, 'COL00001', 1)", []).unwrap();
-    c.execute("INSERT INTO collectionItems VALUES (1, 1, 0), (1, 2, 1), (1, 4, 2)", []).unwrap();
-    c.execute("INSERT INTO tags VALUES (1, 'history'), (2, 'method')", []).unwrap();
-    c.execute("INSERT INTO itemTags VALUES (1, 1, 0), (2, 2, 0)", []).unwrap();
+    c.execute(
+        "INSERT INTO collections VALUES (1, 'Reading List', NULL, 1, 'COL00001', 1)",
+        [],
+    )
+    .unwrap();
+    c.execute(
+        "INSERT INTO collectionItems VALUES (1, 1, 0), (1, 2, 1), (1, 4, 2)",
+        [],
+    )
+    .unwrap();
+    c.execute("INSERT INTO tags VALUES (1, 'history'), (2, 'method')", [])
+        .unwrap();
+    c.execute("INSERT INTO itemTags VALUES (1, 1, 0), (2, 2, 0)", [])
+        .unwrap();
 
     // Full-text words for item 2
-    c.execute("INSERT INTO fulltextWords VALUES (1, 'zoteroconnectortest'), (2, 'keyword'), (3, 'paper')", []).unwrap();
-    c.execute("INSERT INTO fulltextItems VALUES (3, 1, 1, 50, 50, 1, 0)", []).unwrap();
-    c.execute("INSERT INTO fulltextItemWords VALUES (1, 3), (2, 3), (3, 3)", []).unwrap();
+    c.execute(
+        "INSERT INTO fulltextWords VALUES (1, 'zoteroconnectortest'), (2, 'keyword'), (3, 'paper')",
+        [],
+    )
+    .unwrap();
+    c.execute(
+        "INSERT INTO fulltextItems VALUES (3, 1, 1, 50, 50, 1, 0)",
+        [],
+    )
+    .unwrap();
+    c.execute(
+        "INSERT INTO fulltextItemWords VALUES (1, 3), (2, 3), (3, 3)",
+        [],
+    )
+    .unwrap();
 
     // Annotation on the PDF attachment (parentItemID = 3, attachment for item 2)
     c.execute("INSERT INTO items VALUES (6, 37, '2026-05-04 00:00:00', '2026-05-04 00:00:00', '2026-05-04 00:00:00', 1, 'ANNO0001', 1, 0)", []).unwrap();

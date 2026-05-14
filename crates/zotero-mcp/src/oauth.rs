@@ -32,11 +32,11 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::{
-    Form, Json, Router,
     extract::{Query, State},
-    http::{HeaderMap, StatusCode, header},
+    http::{header, HeaderMap, StatusCode},
     response::IntoResponse,
     routing::{get, post},
+    Form, Json, Router,
 };
 use base64::Engine;
 use serde::{Deserialize, Serialize};
@@ -49,12 +49,10 @@ const AUTH_CODE_TTL_SECS: u64 = 300;
 /// spec requires exact-match validation against pre-registered values — for a
 /// single-purpose connector talking only to Claude.ai we hardcode the two
 /// hostnames Anthropic actually uses.
-const ALLOWED_REDIRECT_URI_PREFIXES: &[&str] = &[
-    "https://claude.ai/api/mcp/",
-    "https://claude.com/api/mcp/",
-];
+const ALLOWED_REDIRECT_URI_PREFIXES: &[&str] =
+    &["https://claude.ai/api/mcp/", "https://claude.com/api/mcp/"];
 
-pub const DEFAULT_ACCESS_TOKEN_TTL_SECS: u64 = 7 * 24 * 3600;   // 7 days
+pub const DEFAULT_ACCESS_TOKEN_TTL_SECS: u64 = 7 * 24 * 3600; // 7 days
 pub const DEFAULT_REFRESH_TOKEN_TTL_SECS: u64 = 90 * 24 * 3600; // 90 days
 
 /// Pre-shared OAuth client credentials. Persisted at
@@ -77,12 +75,14 @@ pub struct OAuthConfig {
 impl OAuthConfig {
     pub fn effective_access_ttl(&self) -> std::time::Duration {
         std::time::Duration::from_secs(
-            self.access_token_ttl_secs.unwrap_or(DEFAULT_ACCESS_TOKEN_TTL_SECS),
+            self.access_token_ttl_secs
+                .unwrap_or(DEFAULT_ACCESS_TOKEN_TTL_SECS),
         )
     }
     pub fn effective_refresh_ttl(&self) -> std::time::Duration {
         std::time::Duration::from_secs(
-            self.refresh_token_ttl_secs.unwrap_or(DEFAULT_REFRESH_TOKEN_TTL_SECS),
+            self.refresh_token_ttl_secs
+                .unwrap_or(DEFAULT_REFRESH_TOKEN_TTL_SECS),
         )
     }
 }
@@ -434,7 +434,10 @@ async fn handle_authorization_code(
         }
     } else if let Some(client_id) = body.client_id.as_deref() {
         // client_id alone (public client) — must still match.
-        if !constant_time_eq(client_id.as_bytes(), state.inner.config.client_id.as_bytes()) {
+        if !constant_time_eq(
+            client_id.as_bytes(),
+            state.inner.config.client_id.as_bytes(),
+        ) {
             return invalid_client();
         }
     }
@@ -484,7 +487,10 @@ async fn handle_refresh_token(
             return invalid_client();
         }
     } else if let Some(client_id) = body.client_id.as_deref() {
-        if !constant_time_eq(client_id.as_bytes(), state.inner.config.client_id.as_bytes()) {
+        if !constant_time_eq(
+            client_id.as_bytes(),
+            state.inner.config.client_id.as_bytes(),
+        ) {
             return invalid_client();
         }
     }
@@ -603,7 +609,10 @@ async fn authorize_handler(
     if q.code_challenge_method != "S256" {
         return redirect_with_error(&q.redirect_uri, &q.state, "invalid_request");
     }
-    if !constant_time_eq(q.client_id.as_bytes(), state.inner.config.client_id.as_bytes()) {
+    if !constant_time_eq(
+        q.client_id.as_bytes(),
+        state.inner.config.client_id.as_bytes(),
+    ) {
         return redirect_with_error(&q.redirect_uri, &q.state, "unauthorized_client");
     }
     if q.code_challenge.is_empty() {
@@ -732,7 +741,7 @@ pub fn router(state: OAuthState) -> Router {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::body::{Body, to_bytes};
+    use axum::body::{to_bytes, Body};
     use axum::http::Request;
     use tower::ServiceExt;
 
@@ -792,10 +801,7 @@ mod tests {
     }
 
     fn tempdir() -> PathBuf {
-        let p = std::env::temp_dir().join(format!(
-            "zotero-mcp-test-{}",
-            rand::random::<u64>()
-        ));
+        let p = std::env::temp_dir().join(format!("zotero-mcp-test-{}", rand::random::<u64>()));
         std::fs::create_dir_all(&p).unwrap();
         p
     }
@@ -932,7 +938,10 @@ mod tests {
         assert!(body.contains("\"token_endpoint\":\"https://example.test/oauth/token\""));
         assert!(body.contains("\"authorization_code\""));
         assert!(body.contains("\"client_credentials\""));
-        assert!(body.contains("\"refresh_token\""), "discovery must advertise refresh_token grant; body was: {body}");
+        assert!(
+            body.contains("\"refresh_token\""),
+            "discovery must advertise refresh_token grant; body was: {body}"
+        );
         assert!(body.contains("\"code_challenge_methods_supported\":[\"S256\"]"));
 
         let resp = app
@@ -1081,7 +1090,12 @@ mod tests {
             "/authorize?response_type=code&client_id=test-id&redirect_uri=https%3A%2F%2Fclaude.ai%2Fapi%2Fmcp%2Fauth_callback&code_challenge={challenge}&code_challenge_method=S256&state=s",
         );
         let resp = router(state.clone())
-            .oneshot(Request::builder().uri(auth_uri).body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri(auth_uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         let location = resp
@@ -1125,11 +1139,26 @@ mod tests {
             "/authorize?response_type=code&client_id=test-id&redirect_uri=https%3A%2F%2Fclaude.ai%2Fapi%2Fmcp%2Fauth_callback&code_challenge={challenge}&code_challenge_method=S256&state=s",
         );
         let resp = router(state.clone())
-            .oneshot(Request::builder().uri(auth_uri).body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri(auth_uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
-        let location = resp.headers().get(header::LOCATION).unwrap().to_str().unwrap().to_string();
-        let code = location.split_once("code=").and_then(|(_, r)| r.split('&').next()).unwrap().to_string();
+        let location = resp
+            .headers()
+            .get(header::LOCATION)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        let code = location
+            .split_once("code=")
+            .and_then(|(_, r)| r.split('&').next())
+            .unwrap()
+            .to_string();
 
         let body = format!(
             "grant_type=authorization_code&code={code}&redirect_uri=https%3A%2F%2Fclaude.ai%2Fapi%2Fmcp%2Fauth_callback&code_verifier={verifier}&client_id=test-id"
@@ -1149,7 +1178,10 @@ mod tests {
         let body = body_string(resp).await;
         assert!(body.contains("\"access_token\""), "body was: {body}");
         assert!(body.contains("\"refresh_token\""), "body was: {body}");
-        assert!(body.contains("\"refresh_expires_in\":7776000"), "body was: {body}");
+        assert!(
+            body.contains("\"refresh_expires_in\":7776000"),
+            "body was: {body}"
+        );
     }
 
     async fn auth_code_full_flow(state: OAuthState) -> (String, String) {
@@ -1159,20 +1191,40 @@ mod tests {
             "/authorize?response_type=code&client_id=test-id&redirect_uri=https%3A%2F%2Fclaude.ai%2Fapi%2Fmcp%2Fauth_callback&code_challenge={challenge}&code_challenge_method=S256&state=s",
         );
         let resp = router(state.clone())
-            .oneshot(Request::builder().uri(auth_uri).body(Body::empty()).unwrap())
-            .await.unwrap();
-        let location = resp.headers().get(header::LOCATION).unwrap().to_str().unwrap().to_string();
-        let code = location.split_once("code=").and_then(|(_, r)| r.split('&').next()).unwrap().to_string();
+            .oneshot(
+                Request::builder()
+                    .uri(auth_uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let location = resp
+            .headers()
+            .get(header::LOCATION)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        let code = location
+            .split_once("code=")
+            .and_then(|(_, r)| r.split('&').next())
+            .unwrap()
+            .to_string();
         let body = format!(
             "grant_type=authorization_code&code={code}&redirect_uri=https%3A%2F%2Fclaude.ai%2Fapi%2Fmcp%2Fauth_callback&code_verifier={verifier}&client_id=test-id"
         );
-        let resp = router(state).oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/oauth/token")
-                .header("content-type", "application/x-www-form-urlencoded")
-                .body(Body::from(body)).unwrap(),
-        ).await.unwrap();
+        let resp = router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/oauth/token")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         let body_str = body_string(resp).await;
         let parsed: serde_json::Value = serde_json::from_str(&body_str).unwrap();
         let access = parsed["access_token"].as_str().unwrap().to_string();
@@ -1181,13 +1233,17 @@ mod tests {
     }
 
     async fn post_token(state: OAuthState, body: &str) -> axum::response::Response {
-        router(state).oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/oauth/token")
-                .header("content-type", "application/x-www-form-urlencoded")
-                .body(Body::from(body.to_string())).unwrap(),
-        ).await.unwrap()
+        router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/oauth/token")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
     }
 
     #[tokio::test]
@@ -1197,7 +1253,8 @@ mod tests {
         let resp = post_token(
             state.clone(),
             &format!("grant_type=refresh_token&refresh_token={refresh}&client_id=test-id"),
-        ).await;
+        )
+        .await;
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
         let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -1213,12 +1270,18 @@ mod tests {
         let state = test_state();
         let (_, refresh) = auth_code_full_flow(state.clone()).await;
         // First use OK
-        let r1 = post_token(state.clone(),
-            &format!("grant_type=refresh_token&refresh_token={refresh}&client_id=test-id")).await;
+        let r1 = post_token(
+            state.clone(),
+            &format!("grant_type=refresh_token&refresh_token={refresh}&client_id=test-id"),
+        )
+        .await;
         assert_eq!(r1.status(), StatusCode::OK);
         // Second use of same refresh token must fail
-        let r2 = post_token(state,
-            &format!("grant_type=refresh_token&refresh_token={refresh}&client_id=test-id")).await;
+        let r2 = post_token(
+            state,
+            &format!("grant_type=refresh_token&refresh_token={refresh}&client_id=test-id"),
+        )
+        .await;
         assert_eq!(r2.status(), StatusCode::BAD_REQUEST);
         let body = body_string(r2).await;
         assert!(body.contains("invalid_grant"));
@@ -1228,24 +1291,39 @@ mod tests {
     async fn refresh_token_replay_revokes_chain() {
         let state = test_state();
         let (orig_access, refresh) = auth_code_full_flow(state.clone()).await;
-        let r1 = post_token(state.clone(),
-            &format!("grant_type=refresh_token&refresh_token={refresh}&client_id=test-id")).await;
+        let r1 = post_token(
+            state.clone(),
+            &format!("grant_type=refresh_token&refresh_token={refresh}&client_id=test-id"),
+        )
+        .await;
         let body = body_string(r1).await;
         let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
         let new_access = parsed["access_token"].as_str().unwrap().to_string();
         // Replay original refresh — must revoke chain.
-        let _ = post_token(state.clone(),
-            &format!("grant_type=refresh_token&refresh_token={refresh}&client_id=test-id")).await;
+        let _ = post_token(
+            state.clone(),
+            &format!("grant_type=refresh_token&refresh_token={refresh}&client_id=test-id"),
+        )
+        .await;
         // Both the new access AND the original access must now be invalid.
-        assert!(!state.validate_token(&new_access).await, "new access should be revoked after replay");
-        assert!(!state.validate_token(&orig_access).await, "original access should be revoked after replay");
+        assert!(
+            !state.validate_token(&new_access).await,
+            "new access should be revoked after replay"
+        );
+        assert!(
+            !state.validate_token(&orig_access).await,
+            "original access should be revoked after replay"
+        );
     }
 
     #[tokio::test]
     async fn refresh_token_grant_with_unknown_token_returns_invalid_grant() {
         let state = test_state();
-        let resp = post_token(state,
-            "grant_type=refresh_token&refresh_token=never-issued&client_id=test-id").await;
+        let resp = post_token(
+            state,
+            "grant_type=refresh_token&refresh_token=never-issued&client_id=test-id",
+        )
+        .await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         let body = body_string(resp).await;
         assert!(body.contains("invalid_grant"));
@@ -1260,20 +1338,37 @@ mod tests {
             "/authorize?response_type=code&client_id=test-id&redirect_uri=https%3A%2F%2Fclaude.ai%2Fapi%2Fmcp%2Fauth_callback&code_challenge={challenge}&code_challenge_method=S256&state=s",
         );
         let resp = router(state.clone())
-            .oneshot(Request::builder().uri(auth_uri).body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri(auth_uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
-        let location = resp.headers().get(header::LOCATION).unwrap().to_str().unwrap().to_string();
-        let code = location.split_once("code=").and_then(|(_, r)| r.split('&').next()).unwrap().to_string();
+        let location = resp
+            .headers()
+            .get(header::LOCATION)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        let code = location
+            .split_once("code=")
+            .and_then(|(_, r)| r.split('&').next())
+            .unwrap()
+            .to_string();
         let body = format!(
             "grant_type=authorization_code&code={code}&redirect_uri=https%3A%2F%2Fclaude.ai%2Fapi%2Fmcp%2Fauth_callback&code_verifier={verifier}&client_id=test-id"
         );
-        let make_req = || Request::builder()
-            .method("POST")
-            .uri("/oauth/token")
-            .header("content-type", "application/x-www-form-urlencoded")
-            .body(Body::from(body.clone()))
-            .unwrap();
+        let make_req = || {
+            Request::builder()
+                .method("POST")
+                .uri("/oauth/token")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(body.clone()))
+                .unwrap()
+        };
         let first = router(state.clone()).oneshot(make_req()).await.unwrap();
         assert_eq!(first.status(), StatusCode::OK);
         let second = router(state).oneshot(make_req()).await.unwrap();

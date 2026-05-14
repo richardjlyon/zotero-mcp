@@ -1,10 +1,10 @@
+use crate::core::citations::{format_bibliography, format_citation};
 use crate::state::AppState;
 use crate::tools::search::map_err;
-use rmcp::ErrorData as Error;
 use rmcp::model::{CallToolResult, Content};
+use rmcp::ErrorData as Error;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use crate::core::citations::{format_bibliography, format_citation};
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 pub struct FormatCitationArgs {

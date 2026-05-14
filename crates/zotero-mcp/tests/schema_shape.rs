@@ -6,11 +6,13 @@ fn property_type(schema_json: &serde_json::Value, name: &str) -> String {
     schema_json["properties"][name]["type"]
         .as_str()
         .map(String::from)
-        .unwrap_or_else(|| panic!(
-            "property `{}` has no `type`; full schema: {}",
-            name,
-            serde_json::to_string_pretty(schema_json).unwrap()
-        ))
+        .unwrap_or_else(|| {
+            panic!(
+                "property `{}` has no `type`; full schema: {}",
+                name,
+                serde_json::to_string_pretty(schema_json).unwrap()
+            )
+        })
 }
 
 #[test]

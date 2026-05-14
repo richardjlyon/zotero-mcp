@@ -1,6 +1,6 @@
 use crate::core::cache::DiskCache;
-use crate::core::error::{Error, Result};
 use crate::core::enrichment::NormalizedRecord;
+use crate::core::error::{Error, Result};
 use crate::core::types::Creator;
 use serde_json::{Map, Value};
 
@@ -13,8 +13,15 @@ pub struct ArxivClient {
 
 impl ArxivClient {
     pub fn new(base: impl Into<String>, cache: DiskCache, user_agent: &str) -> Self {
-        let http = reqwest::Client::builder().user_agent(user_agent).build().unwrap();
-        Self { base: base.into(), cache, http }
+        let http = reqwest::Client::builder()
+            .user_agent(user_agent)
+            .build()
+            .unwrap();
+        Self {
+            base: base.into(),
+            cache,
+            http,
+        }
     }
 
     pub async fn lookup_arxiv(&self, id: &str) -> Result<NormalizedRecord> {
@@ -56,7 +63,9 @@ fn parse_entry(atom: &str) -> Option<NormalizedRecord> {
         .or_else(|| atom.match_indices("<title>").next())
         .and_then(|(i, _)| {
             let after = &atom[i + "<title>".len()..];
-            after.find("</title>").map(|j| after[..j].trim().to_string())
+            after
+                .find("</title>")
+                .map(|j| after[..j].trim().to_string())
         })?;
 
     let extract = |open: &str, close: &str| {
@@ -66,7 +75,11 @@ fn parse_entry(atom: &str) -> Option<NormalizedRecord> {
     };
     let summary = extract("<summary>", "</summary>").unwrap_or_default();
     let published = extract("<published>", "</published>").unwrap_or_default();
-    let date_only = published.split('T').next().unwrap_or(&published).to_string();
+    let date_only = published
+        .split('T')
+        .next()
+        .unwrap_or(&published)
+        .to_string();
 
     let mut creators = vec![];
     let mut cursor = 0usize;

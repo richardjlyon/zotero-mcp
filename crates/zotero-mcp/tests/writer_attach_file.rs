@@ -76,7 +76,10 @@ async fn linked_file_outside_base_dir_errors_without_network() {
         .await
         .unwrap_err();
     match err {
-        Error::AttachmentOutsideBaseDir { file_path, base_dir: b } => {
+        Error::AttachmentOutsideBaseDir {
+            file_path,
+            base_dir: b,
+        } => {
             assert_eq!(file_path, outside);
             assert_eq!(b, base_dir);
         }
@@ -154,7 +157,10 @@ async fn attach_file_returns_too_large_when_over_limit() {
         .await
         .unwrap_err();
     match err {
-        Error::AttachmentTooLarge { file_path: p, limit } => {
+        Error::AttachmentTooLarge {
+            file_path: p,
+            limit,
+        } => {
             assert_eq!(p, file_path);
             assert_eq!(limit, 100);
         }

@@ -1,6 +1,6 @@
 use crate::core::cache::DiskCache;
-use crate::core::error::{Error, Result};
 use crate::core::enrichment::NormalizedRecord;
+use crate::core::error::{Error, Result};
 use crate::core::types::Creator;
 use serde_json::{Map, Value};
 
@@ -13,9 +13,22 @@ pub struct SemanticScholarClient {
 }
 
 impl SemanticScholarClient {
-    pub fn new(base: impl Into<String>, cache: DiskCache, user_agent: &str, api_key: Option<String>) -> Self {
-        let http = reqwest::Client::builder().user_agent(user_agent).build().unwrap();
-        Self { base: base.into(), cache, http, api_key }
+    pub fn new(
+        base: impl Into<String>,
+        cache: DiskCache,
+        user_agent: &str,
+        api_key: Option<String>,
+    ) -> Self {
+        let http = reqwest::Client::builder()
+            .user_agent(user_agent)
+            .build()
+            .unwrap();
+        Self {
+            base: base.into(),
+            cache,
+            http,
+            api_key,
+        }
     }
 
     pub async fn search(&self, query: &str, limit: usize) -> Result<Vec<NormalizedRecord>> {
@@ -79,7 +92,8 @@ fn parse(v: &Value) -> Vec<NormalizedRecord> {
                                 .enumerate()
                                 .map(|(i, a)| {
                                     let name = a.get("name").and_then(|x| x.as_str()).unwrap_or("");
-                                    let (first, last) = crate::core::enrichment::openlibrary_like_split(name);
+                                    let (first, last) =
+                                        crate::core::enrichment::openlibrary_like_split(name);
                                     Creator {
                                         first_name: first,
                                         last_name: last,

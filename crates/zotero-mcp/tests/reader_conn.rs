@@ -1,5 +1,5 @@
 mod fixtures;
-use zotero_mcp::core::reader::conn::{open_read_only, check_schema};
+use zotero_mcp::core::reader::conn::{check_schema, open_read_only};
 
 #[test]
 fn opens_read_only_and_passes_schema_check() {

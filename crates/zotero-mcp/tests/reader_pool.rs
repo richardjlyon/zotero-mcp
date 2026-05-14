@@ -12,7 +12,9 @@ async fn pool_runs_concurrent_queries() {
             p.with_conn(|c| {
                 let n: i64 = c.query_row("SELECT COUNT(*) FROM items", [], |r| r.get(0))?;
                 Ok(n)
-            }).await.unwrap()
+            })
+            .await
+            .unwrap()
         }));
     }
     for h in handles {

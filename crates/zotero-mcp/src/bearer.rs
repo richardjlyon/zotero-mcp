@@ -45,10 +45,7 @@ pub async fn require_bearer_token(
     tracing::info!(error, "bearer auth failed");
     (
         status,
-        [(
-            axum::http::header::WWW_AUTHENTICATE,
-            challenge.as_str(),
-        )],
+        [(axum::http::header::WWW_AUTHENTICATE, challenge.as_str())],
     )
         .into_response()
 }
@@ -59,14 +56,12 @@ mod tests {
     use crate::oauth::{OAuthConfig, OAuthState};
     use axum::body::Body;
     use axum::http::Request as HttpRequest;
-    use axum::{Router, routing::get};
+    use axum::{routing::get, Router};
     use tower::ServiceExt;
 
     fn test_oauth_state() -> OAuthState {
-        let dir = std::env::temp_dir().join(format!(
-            "zotero-mcp-bearer-test-{}",
-            rand::random::<u64>()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("zotero-mcp-bearer-test-{}", rand::random::<u64>()));
         std::fs::create_dir_all(&dir).unwrap();
         OAuthState::with_tokens_path(
             OAuthConfig {

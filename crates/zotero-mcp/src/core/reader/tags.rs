@@ -2,7 +2,11 @@ use crate::core::error::Result;
 use crate::core::reader::pool::ReadOnlyPool;
 use crate::core::types::Tag;
 
-pub async fn list(pool: &ReadOnlyPool, library_id: i64, prefix: Option<String>) -> Result<Vec<Tag>> {
+pub async fn list(
+    pool: &ReadOnlyPool,
+    library_id: i64,
+    prefix: Option<String>,
+) -> Result<Vec<Tag>> {
     pool.with_conn(move |c| {
         let like = prefix.as_ref().map(|p| format!("{}%", p));
         let mut out = vec![];
@@ -24,8 +28,12 @@ pub async fn list(pool: &ReadOnlyPool, library_id: i64, prefix: Option<String>) 
             stmt.query([library_id])?
         };
         while let Some(r) = rows.next()? {
-            out.push(Tag { name: r.get(0)?, item_count: r.get(1)? });
+            out.push(Tag {
+                name: r.get(0)?,
+                item_count: r.get(1)?,
+            });
         }
         Ok(out)
-    }).await
+    })
+    .await
 }

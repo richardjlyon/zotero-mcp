@@ -1,6 +1,6 @@
 mod fixtures;
-use zotero_mcp::core::reader::pool::ReadOnlyPool;
 use zotero_mcp::core::reader::annotations::list_annotations;
+use zotero_mcp::core::reader::pool::ReadOnlyPool;
 
 #[tokio::test]
 async fn lists_annotations_for_item() {

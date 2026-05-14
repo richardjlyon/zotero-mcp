@@ -14,7 +14,10 @@ impl BbtClient {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(3))
             .build()?;
-        Ok(Self { base: base.into(), http })
+        Ok(Self {
+            base: base.into(),
+            http,
+        })
     }
 
     pub async fn citationkeys(&self, keys: &[String]) -> Result<HashMap<String, String>> {
@@ -25,13 +28,19 @@ impl BbtClient {
             "id": 1
         });
         let url = format!("{}/better-bibtex/json-rpc", self.base);
-        let resp = self.http.post(&url).json(&payload).send().await
+        let resp = self
+            .http
+            .post(&url)
+            .json(&payload)
+            .send()
+            .await
             .map_err(|_| Error::BbtUnavailable)?;
         let body: Value = resp.json().await?;
         if let Some(err) = body.get("error") {
             return Err(Error::Bbt(err.to_string()));
         }
-        let map: HashMap<String, String> = body.get("result")
+        let map: HashMap<String, String> = body
+            .get("result")
             .and_then(|v| serde_json::from_value(v.clone()).ok())
             .unwrap_or_default();
         Ok(map)

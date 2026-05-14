@@ -166,7 +166,9 @@ pub struct LoggingConfig {
 
 impl Default for LoggingConfig {
     fn default() -> Self {
-        Self { level: "info".into() }
+        Self {
+            level: "info".into(),
+        }
     }
 }
 
@@ -228,8 +230,7 @@ pub fn expand_tilde<S: AsRef<str>>(s: S) -> String {
 }
 
 fn dirs_home() -> Option<String> {
-    directories::UserDirs::new()
-        .map(|u| u.home_dir().to_string_lossy().into_owned())
+    directories::UserDirs::new().map(|u| u.home_dir().to_string_lossy().into_owned())
 }
 
 impl From<&str> for Error {
@@ -286,7 +287,10 @@ pdftotext_path = "/opt/homebrew/bin/pdftotext"
 pdftotext_fallback = false
 "#;
         let c: Config = toml::from_str(toml).unwrap();
-        assert_eq!(c.zotero.pdftotext_path.as_deref(), Some("/opt/homebrew/bin/pdftotext"));
+        assert_eq!(
+            c.zotero.pdftotext_path.as_deref(),
+            Some("/opt/homebrew/bin/pdftotext")
+        );
         assert!(!c.zotero.pdftotext_fallback);
     }
 
