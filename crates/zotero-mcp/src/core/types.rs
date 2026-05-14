@@ -1,7 +1,8 @@
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Item {
     pub key: String,
     pub library_id: i64,
@@ -21,7 +22,7 @@ pub struct Item {
     pub recommended_content_tool: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Creator {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub first_name: Option<String>,
@@ -31,7 +32,7 @@ pub struct Creator {
     pub order_index: i64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Attachment {
     pub key: String,
     pub parent_key: Option<String>,
@@ -41,7 +42,7 @@ pub struct Attachment {
     pub link_mode: AttachmentLinkMode,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum AttachmentLinkMode {
     ImportedFile,
@@ -68,7 +69,7 @@ impl AttachmentLinkMode {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Collection {
     pub key: String,
     pub library_id: i64,
@@ -76,13 +77,13 @@ pub struct Collection {
     pub parent_key: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Tag {
     pub name: String,
     pub item_count: i64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Annotation {
     pub key: String,
     pub parent_attachment_key: String,
@@ -94,7 +95,7 @@ pub struct Annotation {
     pub sort_index: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct SearchHit {
     pub key: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -107,19 +108,19 @@ pub struct SearchHit {
     pub match_excerpt: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 pub struct Diff {
     pub changes: Vec<FieldChange>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct FieldChange {
     pub field: String,
     pub current: Option<Value>,
     pub proposed: Value,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct EnrichmentProposal {
     pub item_key: String,
     pub diff: Diff,
@@ -128,7 +129,7 @@ pub struct EnrichmentProposal {
     pub needs_review: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct SourceBreakdown {
     pub source: String,
     pub matched: bool,
@@ -169,7 +170,10 @@ mod tests {
         let s = serde_json::to_string(&item).unwrap();
         let back: Item = serde_json::from_str(&s).unwrap();
         assert_eq!(back.key, "JGF2UTMW");
-        assert_eq!(back.citation_key.as_deref(), Some("rabkinWhatModernIsrael2016"));
+        assert_eq!(
+            back.citation_key.as_deref(),
+            Some("rabkinWhatModernIsrael2016")
+        );
     }
 
     #[test]

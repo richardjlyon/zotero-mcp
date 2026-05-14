@@ -1,17 +1,33 @@
-use crate::state::AppState;
-use crate::tools::search::map_err;
-use rmcp::ErrorData as Error;
-use rmcp::model::{CallToolResult, Content};
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
-use crate::core::pdf::{get_pdf_first_pages, get_pdf_text};
+use crate::core::pdf::{get_pdf_first_pages, get_pdf_text, PdfTextResult};
 use crate::core::reader::annotations::list_annotations;
 use crate::core::reader::attachments::{list_attachments, resolve_path};
-use crate::core::web::{get_webpage_content, refetch_url, WebMode};
-use crate::core::writer::attachments::{attach_file, attach_link, AttachFileOptions, AttachmentMode};
-use std::path::PathBuf;
+use crate::core::web::{
+    get_webpage_content, refetch_url, RefetchResult, WebContentResult, WebMode,
+};
+use crate::core::writer::attachments::{
+    attach_file, attach_link, AttachFileOptions, AttachmentMode,
+};
 use crate::core::writer::items::create_item;
+use crate::state::AppState;
+use crate::tools::search::map_err;
+use rmcp::model::{CallToolResult, Content};
+use rmcp::ErrorData as Error;
+use rmcp::Json;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use std::path::PathBuf;
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct CreateItemResult {
+    pub item_key: String,
+    pub version: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct AttachmentResult {
+    pub attachment_key: String,
+}
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 pub struct ItemKeyArgs {
@@ -36,13 +52,17 @@ pub async fn get_pdf_path(s: &AppState, a: ItemKeyArgs) -> Result<CallToolResult
     )]))
 }
 
-pub async fn get_pdf_text_t(s: &AppState, a: ItemKeyArgs) -> Result<CallToolResult, Error> {
-    let r = get_pdf_text(&s.pool, &a.item_key, 1, &s.cfg.storage_dir(), &s.pdf_engines)
-        .await
-        .map_err(map_err)?;
-    Ok(CallToolResult::success(vec![Content::json(
-        serde_json::to_value(&r).unwrap(),
-    )?]))
+pub async fn get_pdf_text_t(s: &AppState, a: ItemKeyArgs) -> Result<Json<PdfTextResult>, Error> {
+    let r = get_pdf_text(
+        &s.pool,
+        &a.item_key,
+        1,
+        &s.cfg.storage_dir(),
+        &s.pdf_engines,
+    )
+    .await
+    .map_err(map_err)?;
+    Ok(Json(r))
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
@@ -55,13 +75,21 @@ fn two() -> usize {
     2
 }
 
-pub async fn get_pdf_first_pages_t(s: &AppState, a: FirstPagesArgs) -> Result<CallToolResult, Error> {
-    let r = get_pdf_first_pages(&s.pool, &a.item_key, 1, &s.cfg.storage_dir(), a.n, &s.pdf_engines)
-        .await
-        .map_err(map_err)?;
-    Ok(CallToolResult::success(vec![Content::json(
-        serde_json::to_value(&r).unwrap(),
-    )?]))
+pub async fn get_pdf_first_pages_t(
+    s: &AppState,
+    a: FirstPagesArgs,
+) -> Result<Json<PdfTextResult>, Error> {
+    let r = get_pdf_first_pages(
+        &s.pool,
+        &a.item_key,
+        1,
+        &s.cfg.storage_dir(),
+        a.n,
+        &s.pdf_engines,
+    )
+    .await
+    .map_err(map_err)?;
+    Ok(Json(r))
 }
 
 pub async fn list_annotations_t(s: &AppState, a: ItemKeyArgs) -> Result<CallToolResult, Error> {
@@ -83,7 +111,10 @@ fn default_auto() -> String {
     "auto".into()
 }
 
-pub async fn get_webpage_content_t(s: &AppState, a: WebArgs) -> Result<CallToolResult, Error> {
+pub async fn get_webpage_content_t(
+    s: &AppState,
+    a: WebArgs,
+) -> Result<Json<WebContentResult>, Error> {
     let mode = match a.mode.as_str() {
         "snapshot" => WebMode::Snapshot,
         "live" => WebMode::Live,
@@ -99,9 +130,7 @@ pub async fn get_webpage_content_t(s: &AppState, a: WebArgs) -> Result<CallToolR
     )
     .await
     .map_err(map_err)?;
-    Ok(CallToolResult::success(vec![Content::json(
-        serde_json::to_value(&r).unwrap(),
-    )?]))
+    Ok(Json(r))
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
@@ -111,7 +140,7 @@ pub struct RefetchArgs {
     pub save_as_snapshot: bool,
 }
 
-pub async fn refetch_url_t(s: &AppState, a: RefetchArgs) -> Result<CallToolResult, Error> {
+pub async fn refetch_url_t(s: &AppState, a: RefetchArgs) -> Result<Json<RefetchResult>, Error> {
     let r = refetch_url(
         &s.pool,
         Some(&s.api),
@@ -122,9 +151,7 @@ pub async fn refetch_url_t(s: &AppState, a: RefetchArgs) -> Result<CallToolResul
     )
     .await
     .map_err(map_err)?;
-    Ok(CallToolResult::success(vec![Content::json(
-        serde_json::to_value(&r).unwrap(),
-    )?]))
+    Ok(Json(r))
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
@@ -140,15 +167,18 @@ pub struct CreateItemArgs {
     pub collection_keys: Vec<String>,
 }
 
-pub async fn create_item_t(s: &AppState, a: CreateItemArgs) -> Result<CallToolResult, Error> {
+pub async fn create_item_t(
+    s: &AppState,
+    a: CreateItemArgs,
+) -> Result<Json<CreateItemResult>, Error> {
     let item_value = Value::Object(a.item);
     let (key, version) = create_item(&s.api, &item_value, &a.collection_keys)
         .await
         .map_err(map_err)?;
-    Ok(CallToolResult::success(vec![Content::json(serde_json::json!({
-        "item_key": key,
-        "version": version,
-    }))?]))
+    Ok(Json(CreateItemResult {
+        item_key: key,
+        version,
+    }))
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
@@ -159,13 +189,16 @@ pub struct AttachLinkArgs {
     pub title: Option<String>,
 }
 
-pub async fn attach_link_t(s: &AppState, a: AttachLinkArgs) -> Result<CallToolResult, Error> {
+pub async fn attach_link_t(
+    s: &AppState,
+    a: AttachLinkArgs,
+) -> Result<Json<AttachmentResult>, Error> {
     let key = attach_link(&s.api, &a.parent_key, &a.url, a.title.as_deref())
         .await
         .map_err(map_err)?;
-    Ok(CallToolResult::success(vec![Content::json(serde_json::json!({
-        "attachment_key": key,
-    }))?]))
+    Ok(Json(AttachmentResult {
+        attachment_key: key,
+    }))
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
@@ -184,7 +217,10 @@ pub struct AttachFileArgs {
     pub content_type: Option<String>,
 }
 
-pub async fn attach_file_t(s: &AppState, a: AttachFileArgs) -> Result<CallToolResult, Error> {
+pub async fn attach_file_t(
+    s: &AppState,
+    a: AttachFileArgs,
+) -> Result<Json<AttachmentResult>, Error> {
     let cfg = &s.cfg.zotero;
     let mode_str = a.mode.as_deref().unwrap_or(&cfg.attachment_mode);
     let mode = AttachmentMode::from_config(mode_str);
@@ -203,7 +239,7 @@ pub async fn attach_file_t(s: &AppState, a: AttachFileArgs) -> Result<CallToolRe
     let key = attach_file(&s.api, &a.parent_key, &path, &opts)
         .await
         .map_err(map_err)?;
-    Ok(CallToolResult::success(vec![Content::json(serde_json::json!({
-        "attachment_key": key,
-    }))?]))
+    Ok(Json(AttachmentResult {
+        attachment_key: key,
+    }))
 }

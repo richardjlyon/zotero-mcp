@@ -2,20 +2,21 @@
 // - openlibrary: normalised via parse_date (handles freeform publish_date).
 // - crossref: extract_date pads {YYYY, MM, DD} parts to 2-digit width.
 // - arxiv: published timestamps split at 'T' (arXiv always sends ISO 8601).
+pub mod arxiv;
 pub mod crossref;
 pub mod openlibrary;
-pub mod arxiv;
-pub mod semantic_scholar;
 pub mod pdf_signals;
-pub mod scoring;
 pub mod propose;
+pub mod scoring;
+pub mod semantic_scholar;
 
 use crate::core::types::Creator;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// Result from any enrichment source, already mapped to Zotero's schema vocabulary.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct NormalizedRecord {
     pub source: String,
     pub fields: serde_json::Map<String, Value>,
@@ -141,11 +142,19 @@ mod tests {
 
     #[test]
     fn extra_field_stashes_source_and_source_url() {
-        let r = record_with("openlibrary", "book", "x", Some("https://openlibrary.org/isbn/9780000000000"));
+        let r = record_with(
+            "openlibrary",
+            "book",
+            "x",
+            Some("https://openlibrary.org/isbn/9780000000000"),
+        );
         let v = normalized_to_item(&r);
         let extra = v["extra"].as_str().expect("extra string");
         assert!(extra.contains("source: openlibrary"), "got: {extra:?}");
-        assert!(extra.contains("sourceURL: https://openlibrary.org/isbn/9780000000000"), "got: {extra:?}");
+        assert!(
+            extra.contains("sourceURL: https://openlibrary.org/isbn/9780000000000"),
+            "got: {extra:?}"
+        );
     }
 
     #[test]
@@ -159,8 +168,16 @@ mod tests {
 
     #[test]
     fn extra_appends_to_existing_extra_field() {
-        let mut r = record_with("crossref", "journalArticle", "x", Some("https://doi.org/10.1/x"));
-        r.fields.insert("extra".into(), Value::String("Citation Key: foo2024".into()));
+        let mut r = record_with(
+            "crossref",
+            "journalArticle",
+            "x",
+            Some("https://doi.org/10.1/x"),
+        );
+        r.fields.insert(
+            "extra".into(),
+            Value::String("Citation Key: foo2024".into()),
+        );
         let v = normalized_to_item(&r);
         let extra = v["extra"].as_str().expect("extra string");
         assert!(extra.starts_with("Citation Key: foo2024"));

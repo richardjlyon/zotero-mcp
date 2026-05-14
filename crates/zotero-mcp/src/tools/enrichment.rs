@@ -1,18 +1,19 @@
 use std::collections::BTreeMap;
 
+use crate::core::enrichment::propose::{
+    apply_metadata_update, enrich_item, find_weak_metadata_items, propose_metadata_update,
+    EnrichInput, ProposeInput,
+};
+use crate::core::enrichment::NormalizedRecord;
+use crate::core::types::EnrichmentProposal;
 use crate::state::AppState;
 use crate::tools::search::map_err;
-use rmcp::ErrorData as Error;
 use rmcp::model::{CallToolResult, Content};
+use rmcp::ErrorData as Error;
+use rmcp::Json;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use crate::core::enrichment::NormalizedRecord;
-use crate::core::enrichment::propose::{
-    EnrichInput, ProposeInput, apply_metadata_update, enrich_item, find_weak_metadata_items,
-    propose_metadata_update,
-};
-use crate::core::types::EnrichmentProposal;
 
 fn invalid(msg: String) -> Error {
     Error::invalid_params(msg, None)
@@ -61,6 +62,9 @@ fn render_record(record: &NormalizedRecord, format: &str) -> Result<Value, Error
     }
 }
 
+// lookup_doi/isbn/arxiv return serde_json::Value whose schema has no root
+// "type": "object" — rmcp 1.7 rejects Json<Value> at startup. These tools
+// stay as Content::json until the API is redesigned to return a typed shape.
 pub async fn lookup_doi_t(s: &AppState, a: DoiArgs) -> Result<CallToolResult, Error> {
     let r = s.crossref.lookup_doi(&a.doi).await.map_err(map_err)?;
     let body = render_record(&r, &a.format)?;
@@ -139,9 +143,8 @@ fn parse_candidates(arr: Vec<Map<String, Value>>) -> Result<Vec<NormalizedRecord
     arr.into_iter()
         .enumerate()
         .map(|(i, m)| {
-            serde_json::from_value(Value::Object(m)).map_err(|e| {
-                invalid(format!("candidates[{}] invalid NormalizedRecord: {}", i, e))
-            })
+            serde_json::from_value(Value::Object(m))
+                .map_err(|e| invalid(format!("candidates[{}] invalid NormalizedRecord: {}", i, e)))
         })
         .collect()
 }
@@ -149,7 +152,7 @@ fn parse_candidates(arr: Vec<Map<String, Value>>) -> Result<Vec<NormalizedRecord
 pub async fn propose_metadata_update_t(
     s: &AppState,
     a: ProposeArgs,
-) -> Result<CallToolResult, Error> {
+) -> Result<Json<EnrichmentProposal>, Error> {
     let candidates = parse_candidates(a.candidates)?;
     let storage_dir = s.cfg.storage_dir();
     let p = propose_metadata_update(
@@ -164,9 +167,7 @@ pub async fn propose_metadata_update_t(
     )
     .await
     .map_err(map_err)?;
-    Ok(CallToolResult::success(vec![Content::json(
-        serde_json::to_value(&p).unwrap(),
-    )?]))
+    Ok(Json(p))
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
@@ -175,10 +176,7 @@ pub struct ApplyArgs {
     pub proposal: BTreeMap<String, Value>,
 }
 
-pub async fn apply_metadata_update_t(
-    s: &AppState,
-    a: ApplyArgs,
-) -> Result<CallToolResult, Error> {
+pub async fn apply_metadata_update_t(s: &AppState, a: ApplyArgs) -> Result<CallToolResult, Error> {
     let proposal: EnrichmentProposal =
         serde_json::from_value(serde_json::to_value(&a.proposal).unwrap())
             .map_err(|e| invalid(format!("proposal is not a valid EnrichmentProposal: {}", e)))?;
@@ -196,7 +194,7 @@ pub struct EnrichArgs {
     pub auto_apply_threshold: Option<f64>,
 }
 
-pub async fn enrich_item_t(s: &AppState, a: EnrichArgs) -> Result<CallToolResult, Error> {
+pub async fn enrich_item_t(s: &AppState, a: EnrichArgs) -> Result<Json<EnrichmentProposal>, Error> {
     let candidates = parse_candidates(a.candidates)?;
     let threshold = a
         .auto_apply_threshold
@@ -216,9 +214,7 @@ pub async fn enrich_item_t(s: &AppState, a: EnrichArgs) -> Result<CallToolResult
     )
     .await
     .map_err(map_err)?;
-    Ok(CallToolResult::success(vec![Content::json(
-        serde_json::to_value(&p).unwrap(),
-    )?]))
+    Ok(Json(p))
 }
 
 #[cfg(test)]

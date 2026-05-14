@@ -1,11 +1,13 @@
-use crate::state::AppState;
-use rmcp::ErrorData as Error;
-use rmcp::model::{CallToolResult, Content};
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
 use crate::core::reader::items::{get_item_by_key, hydrate_citation_key};
 use crate::core::reader::search::{search_metadata, SearchParams};
 use crate::core::reader::{collections, recent, tags};
+use crate::core::types::Item;
+use crate::state::AppState;
+use rmcp::model::{CallToolResult, Content};
+use rmcp::ErrorData as Error;
+use rmcp::Json;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 
 pub(crate) fn map_err(e: crate::core::Error) -> Error {
     Error::internal_error(e.to_string(), None)
@@ -60,7 +62,7 @@ pub struct GetItemArgs {
     pub citation_key: Option<String>,
 }
 
-pub async fn get_item(s: &AppState, a: GetItemArgs) -> Result<CallToolResult, Error> {
+pub async fn get_item(s: &AppState, a: GetItemArgs) -> Result<Json<Item>, Error> {
     let key = match (a.item_key, a.citation_key) {
         (Some(k), _) => k,
         (_, Some(_ck)) => {
@@ -78,9 +80,7 @@ pub async fn get_item(s: &AppState, a: GetItemArgs) -> Result<CallToolResult, Er
     };
     let mut item = get_item_by_key(&s.pool, &key, 1).await.map_err(map_err)?;
     hydrate_citation_key(&mut item, s.bbt.as_deref()).await;
-    Ok(CallToolResult::success(vec![Content::json(
-        serde_json::to_value(&item).unwrap(),
-    )?]))
+    Ok(Json(item))
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]

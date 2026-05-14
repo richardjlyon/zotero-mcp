@@ -1,13 +1,14 @@
 use crate::core::error::{Error, Result};
-use crate::core::reader::pool::ReadOnlyPool;
 use crate::core::reader::attachments::resolve_path;
+use crate::core::reader::pool::ReadOnlyPool;
 use async_trait::async_trait;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum PdfTextSource {
     ZoteroCache,
@@ -16,7 +17,7 @@ pub enum PdfTextSource {
     PdftotextFallback,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct PdfTextResult {
     pub text: String,
     pub source: PdfTextSource,
@@ -73,8 +74,13 @@ impl PdfEngine for PdfExtractEngine {
         match join {
             Ok(Ok(text)) => Ok(text),
             Ok(Err(msg)) => Err(EngineError::Failed(msg)),
-            Err(je) if je.is_panic() => Err(EngineError::Failed(format!("pdf-extract panicked: {}", je))),
-            Err(je) => Err(EngineError::Failed(format!("pdf-extract task cancelled: {}", je))),
+            Err(je) if je.is_panic() => {
+                Err(EngineError::Failed(format!("pdf-extract panicked: {}", je)))
+            }
+            Err(je) => Err(EngineError::Failed(format!(
+                "pdf-extract task cancelled: {}",
+                je
+            ))),
         }
     }
 }
@@ -178,7 +184,11 @@ impl PdftotextEngine {
 
     #[doc(hidden)] // Test-only constructor (public for integration tests in tests/).
     pub fn with_timeout(binary: PathBuf, timeout: Duration) -> Self {
-        Self { binary, timeout, max_bytes: 50 * 1024 * 1024 }
+        Self {
+            binary,
+            timeout,
+            max_bytes: 50 * 1024 * 1024,
+        }
     }
 }
 
@@ -189,7 +199,8 @@ impl PdfEngine for PdftotextEngine {
         use tokio::process::Command;
 
         let mut child = Command::new(&self.binary)
-            .arg("-enc").arg("UTF-8")
+            .arg("-enc")
+            .arg("UTF-8")
             .arg("-q")
             .arg("--")
             .arg(path)
@@ -201,9 +212,13 @@ impl PdfEngine for PdftotextEngine {
             .spawn()
             .map_err(|e| EngineError::Failed(format!("failed to spawn pdftotext: {}", e)))?;
 
-        let mut stdout_pipe = child.stdout.take()
+        let mut stdout_pipe = child
+            .stdout
+            .take()
             .ok_or_else(|| EngineError::Failed("pdftotext stdout missing".into()))?;
-        let mut stderr_pipe = child.stderr.take()
+        let mut stderr_pipe = child
+            .stderr
+            .take()
             .ok_or_else(|| EngineError::Failed("pdftotext stderr missing".into()))?;
 
         let max_bytes = self.max_bytes;
@@ -220,11 +235,16 @@ impl PdfEngine for PdftotextEngine {
 
         let timeout_secs = self.timeout.as_secs();
         let extraction = async move {
-            let status = child.wait().await.map_err(|e| format!("pdftotext wait failed: {}", e))?;
-            let stdout = stdout_task.await
+            let status = child
+                .wait()
+                .await
+                .map_err(|e| format!("pdftotext wait failed: {}", e))?;
+            let stdout = stdout_task
+                .await
                 .map_err(|e| format!("pdftotext stdout task panicked: {}", e))?
                 .map_err(|e| format!("pdftotext stdout read failed: {}", e))?;
-            let stderr = stderr_task.await
+            let stderr = stderr_task
+                .await
                 .map_err(|e| format!("pdftotext stderr task panicked: {}", e))?
                 .map_err(|e| format!("pdftotext stderr read failed: {}", e))?;
             Ok::<_, String>((status, stdout, stderr))
@@ -240,7 +260,8 @@ impl PdfEngine for PdftotextEngine {
             let serr = String::from_utf8_lossy(&stderr);
             return Err(EngineError::Failed(format!(
                 "pdftotext exited {}: {}",
-                status, serr.trim()
+                status,
+                serr.trim()
             )));
         }
 
@@ -248,7 +269,9 @@ impl PdfEngine for PdftotextEngine {
             // Empty stdout most commonly means pdftotext failed silently; an
             // image-only (scanned) PDF would also extract no text. We surface
             // the same error in both cases — OCR is out of scope.
-            return Err(EngineError::Failed("pdftotext produced empty output".into()));
+            return Err(EngineError::Failed(
+                "pdftotext produced empty output".into(),
+            ));
         }
 
         String::from_utf8(stdout)
@@ -285,7 +308,11 @@ pub async fn get_pdf_first_pages(
     if text.len() < full.text.len() {
         text.push_str("\n[... truncated ...]");
     }
-    Ok(PdfTextResult { text, source: full.source, character_count: cap })
+    Ok(PdfTextResult {
+        text,
+        source: full.source,
+        character_count: cap,
+    })
 }
 
 /// Core orchestrator: cache check → primary engine → fallback engine.
@@ -344,7 +371,10 @@ async fn extract(
     let text = match fallback.extract(pdf_path).await {
         Ok(t) => t,
         Err(EngineError::Timeout(secs)) => {
-            return Err(Error::PdftotextTimeout(secs, pdf_path.display().to_string()));
+            return Err(Error::PdftotextTimeout(
+                secs,
+                pdf_path.display().to_string(),
+            ));
         }
         Err(EngineError::Failed(msg)) => {
             return Err(Error::PdfAllEnginesFailed {
@@ -434,7 +464,9 @@ mod orchestrator_tests {
 
     impl StubEngine {
         fn new(results: Vec<std::result::Result<String, EngineError>>) -> Arc<dyn PdfEngine> {
-            Arc::new(Self { queue: Mutex::new(results) })
+            Arc::new(Self {
+                queue: Mutex::new(results),
+            })
         }
         fn ok(text: &str) -> Arc<dyn PdfEngine> {
             Self::new(vec![Ok(text.into())])
@@ -481,7 +513,10 @@ mod orchestrator_tests {
         std::fs::write(dir.path().join(".zotero-ft-cache"), "cached body\n").unwrap();
         let pdf = write_dummy_pdf(dir.path());
 
-        let engines = engines_with(StubEngine::never(), FallbackState::Ready(StubEngine::never()));
+        let engines = engines_with(
+            StubEngine::never(),
+            FallbackState::Ready(StubEngine::never()),
+        );
         let r = extract(&pdf, dir.path(), &engines).await.unwrap();
 
         assert_eq!(r.source, PdfTextSource::ZoteroCache);
@@ -493,12 +528,18 @@ mod orchestrator_tests {
         let dir = TempDir::new().unwrap();
         let pdf = write_dummy_pdf(dir.path());
 
-        let engines = engines_with(StubEngine::ok("primary text"), FallbackState::Ready(StubEngine::never()));
+        let engines = engines_with(
+            StubEngine::ok("primary text"),
+            FallbackState::Ready(StubEngine::never()),
+        );
         let r = extract(&pdf, dir.path(), &engines).await.unwrap();
 
         assert_eq!(r.source, PdfTextSource::LiveExtract);
         assert_eq!(r.text, "primary text");
-        assert!(!dir.path().join(".zotero-ft-cache").exists(), "cache must not be written on primary success");
+        assert!(
+            !dir.path().join(".zotero-ft-cache").exists(),
+            "cache must not be written on primary success"
+        );
     }
 
     #[tokio::test]
@@ -531,7 +572,10 @@ mod orchestrator_tests {
         let err = extract(&pdf, dir.path(), &engines).await.unwrap_err();
 
         match err {
-            Error::PdfAllEnginesFailed { pdf_extract, pdftotext } => {
+            Error::PdfAllEnginesFailed {
+                pdf_extract,
+                pdftotext,
+            } => {
                 assert_eq!(pdf_extract, "primary boom");
                 assert_eq!(pdftotext, "pdftotext boom");
             }

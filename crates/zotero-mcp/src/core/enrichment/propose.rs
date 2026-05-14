@@ -1,8 +1,8 @@
+use crate::core::enrichment::{pdf_signals::PdfSignals, scoring, NormalizedRecord};
 use crate::core::error::{Error, Result};
-use crate::core::enrichment::{NormalizedRecord, pdf_signals::PdfSignals, scoring};
 use crate::core::pdf::get_pdf_first_pages;
-use crate::core::reader::pool::ReadOnlyPool;
 use crate::core::reader::items::get_item_by_key;
+use crate::core::reader::pool::ReadOnlyPool;
 use crate::core::types::{Diff, EnrichmentProposal, FieldChange, SourceBreakdown};
 use crate::core::writer::client::LocalApi;
 use crate::core::writer::items::update_item_fields;
@@ -19,7 +19,11 @@ pub fn compute_diff(current: &Value, proposed: &Value) -> Diff {
                 None => !pv.is_null(),
             };
             if differs {
-                changes.push(FieldChange { field: k.clone(), current: cv, proposed: pv.clone() });
+                changes.push(FieldChange {
+                    field: k.clone(),
+                    current: cv,
+                    proposed: pv.clone(),
+                });
             }
         }
     }
@@ -31,7 +35,11 @@ pub fn compute_diff(current: &Value, proposed: &Value) -> Diff {
 ///   - missing abstractNote
 ///   - title equal to attached filename
 ///   - very short title
-pub async fn find_weak_metadata_items(pool: &ReadOnlyPool, library_id: i64, limit: i64) -> Result<Vec<(String, Vec<String>)>> {
+pub async fn find_weak_metadata_items(
+    pool: &ReadOnlyPool,
+    library_id: i64,
+    limit: i64,
+) -> Result<Vec<(String, Vec<String>)>> {
     pool.with_conn(move |c| {
         let mut out = vec![];
         let mut stmt = c.prepare(
@@ -66,7 +74,9 @@ pub async fn find_weak_metadata_items(pool: &ReadOnlyPool, library_id: i64, limi
             } else {
                 reasons.push("missing title".into());
             }
-            if !reasons.is_empty() { out.push((key, reasons)); }
+            if !reasons.is_empty() {
+                out.push((key, reasons));
+            }
         }
         Ok(out)
     }).await
@@ -80,11 +90,23 @@ pub struct ProposeInput<'a> {
     pub engines: &'a crate::core::pdf::PdfEngines,
 }
 
-pub async fn propose_metadata_update(pool: &ReadOnlyPool, inp: ProposeInput<'_>) -> Result<EnrichmentProposal> {
+pub async fn propose_metadata_update(
+    pool: &ReadOnlyPool,
+    inp: ProposeInput<'_>,
+) -> Result<EnrichmentProposal> {
     let item = get_item_by_key(pool, inp.item_key, inp.library_id).await?;
 
     // Pull PDF first-page signals if we have a PDF attachment
-    let signals = match get_pdf_first_pages(pool, inp.item_key, inp.library_id, inp.storage_dir, 1, inp.engines).await {
+    let signals = match get_pdf_first_pages(
+        pool,
+        inp.item_key,
+        inp.library_id,
+        inp.storage_dir,
+        1,
+        inp.engines,
+    )
+    .await
+    {
         Ok(p) => crate::core::enrichment::pdf_signals::extract_signals(&p.text),
         Err(_) => PdfSignals::default(),
     };
@@ -93,9 +115,12 @@ pub async fn propose_metadata_update(pool: &ReadOnlyPool, inp: ProposeInput<'_>)
     let mut best: Option<(f64, usize, Vec<String>)> = None;
     let mut source_breakdown: Vec<SourceBreakdown> = vec![];
     for (idx, c) in inp.candidates.iter().enumerate() {
-        let scoring::ScoreBreakdown { score: s, reasons } = scoring::score(&scoring::ScoringInput {
-            current_fields: &item.fields, signals: &signals, candidate: c,
-        });
+        let scoring::ScoreBreakdown { score: s, reasons } =
+            scoring::score(&scoring::ScoringInput {
+                current_fields: &item.fields,
+                signals: &signals,
+                candidate: c,
+            });
         source_breakdown.push(SourceBreakdown {
             source: c.source.clone(),
             matched: s > 0.5,
@@ -106,22 +131,33 @@ pub async fn propose_metadata_update(pool: &ReadOnlyPool, inp: ProposeInput<'_>)
             best = Some((s, idx, reasons));
         }
     }
-    let (confidence, best_idx, _reasons) = best.ok_or_else(|| Error::Lookup { r#source: "any".into(), message: "no candidates".into() })?;
+    let (confidence, best_idx, _reasons) = best.ok_or_else(|| Error::Lookup {
+        r#source: "any".into(),
+        message: "no candidates".into(),
+    })?;
     let candidate = &inp.candidates[best_idx];
 
     // Build proposed fields, merging only when current is empty/null
     let mut proposed = Map::new();
     if let Value::Object(cur) = &item.fields {
-        for (k, v) in cur { proposed.insert(k.clone(), v.clone()); }
+        for (k, v) in cur {
+            proposed.insert(k.clone(), v.clone());
+        }
     }
     for (k, v) in &candidate.fields {
-        let cur_empty = proposed.get(k).map(|x| matches!(x, Value::Null) || x.as_str().map(|s| s.is_empty()).unwrap_or(false)).unwrap_or(true);
-        if cur_empty { proposed.insert(k.clone(), v.clone()); }
+        let cur_empty = proposed
+            .get(k)
+            .map(|x| matches!(x, Value::Null) || x.as_str().map(|s| s.is_empty()).unwrap_or(false))
+            .unwrap_or(true);
+        if cur_empty {
+            proposed.insert(k.clone(), v.clone());
+        }
     }
     let proposed_v = Value::Object(proposed);
     let diff = compute_diff(&item.fields, &proposed_v);
 
-    let needs_review = confidence < 0.9 || source_breakdown.iter().filter(|s| s.matched).count() < 2;
+    let needs_review =
+        confidence < 0.9 || source_breakdown.iter().filter(|s| s.matched).count() < 2;
 
     Ok(EnrichmentProposal {
         item_key: inp.item_key.into(),
@@ -132,7 +168,12 @@ pub async fn propose_metadata_update(pool: &ReadOnlyPool, inp: ProposeInput<'_>)
     })
 }
 
-pub async fn apply_metadata_update(api: &LocalApi, pool: &ReadOnlyPool, library_id: i64, proposal: &EnrichmentProposal) -> Result<()> {
+pub async fn apply_metadata_update(
+    api: &LocalApi,
+    pool: &ReadOnlyPool,
+    library_id: i64,
+    proposal: &EnrichmentProposal,
+) -> Result<()> {
     let item = get_item_by_key(pool, &proposal.item_key, library_id).await?;
     let mut patch = Map::new();
     for ch in &proposal.diff.changes {
@@ -150,15 +191,23 @@ pub struct EnrichInput<'a> {
     pub engines: &'a crate::core::pdf::PdfEngines,
 }
 
-pub async fn enrich_item(api: &LocalApi, pool: &ReadOnlyPool, inp: EnrichInput<'_>) -> Result<EnrichmentProposal> {
+pub async fn enrich_item(
+    api: &LocalApi,
+    pool: &ReadOnlyPool,
+    inp: EnrichInput<'_>,
+) -> Result<EnrichmentProposal> {
     let auto = inp.auto_apply_threshold;
-    let proposal = propose_metadata_update(pool, ProposeInput {
-        item_key: inp.item_key,
-        library_id: inp.library_id,
-        storage_dir: inp.storage_dir,
-        candidates: inp.candidates,
-        engines: inp.engines,
-    }).await?;
+    let proposal = propose_metadata_update(
+        pool,
+        ProposeInput {
+            item_key: inp.item_key,
+            library_id: inp.library_id,
+            storage_dir: inp.storage_dir,
+            candidates: inp.candidates,
+            engines: inp.engines,
+        },
+    )
+    .await?;
     if proposal.confidence >= auto && !proposal.needs_review {
         apply_metadata_update(api, pool, inp.library_id, &proposal).await?;
     }
