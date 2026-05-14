@@ -601,11 +601,18 @@ mod tests {
         assert!(ZoteroServer::delete_item_tool_attr()
             .output_schema
             .is_none());
+        // search_items + list_collections: Vec-returning tools deferred in Slice G.
+        // MCP spec requires outputSchema root to be type:object; schemars renders Vec<T>
+        // as type:array, which rmcp 1.7 rejects at server startup. Wrapping in an
+        // envelope struct (XxxResult { items: Vec<T> }) satisfies the schema but breaks
+        // content[0].text wire format from [...] to {"items":[...]}. These asserts
+        // guard against an accidental future migration that doesn't address the wire
+        // question.
         assert!(ZoteroServer::search_items_tool_attr()
             .output_schema
-            .is_none()); // reverted
+            .is_none());
         assert!(ZoteroServer::list_collections_tool_attr()
             .output_schema
-            .is_none()); // reverted
+            .is_none());
     }
 }
