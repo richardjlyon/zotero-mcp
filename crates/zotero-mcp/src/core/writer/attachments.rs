@@ -12,25 +12,6 @@ use reqwest::Method;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
-fn md5_hex(bytes: &[u8]) -> String {
-    use md5::{Digest, Md5};
-    let mut h = Md5::new();
-    h.update(bytes);
-    let d = h.finalize();
-    let mut s = String::with_capacity(32);
-    for b in d {
-        s.push_str(&format!("{:02x}", b));
-    }
-    s
-}
-
-fn unix_ms_now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
-}
-
 /// Attach a URL as a `linked_url` child to an existing parent item.
 ///
 /// One POST; no bytes transfer. Returns the new attachment item key.
@@ -262,16 +243,17 @@ async fn attach_file_imported(
     content_type: &str,
     storage_dir: &Path,
 ) -> Result<String> {
-    let md5 = md5_hex(bytes);
-    let mtime = unix_ms_now();
-
-    // Create the attachment row with md5 + mtime pre-populated so Zotero
-    // treats the file as already-linked once bytes appear under storage_dir.
-    // The desktop client's normal sync engine then pushes them to whichever
-    // file backend the user has configured (Zotero cloud, WebDAV, or none).
+    // Create the attachment row WITHOUT md5/mtime/storageHash. Those fields
+    // are how Zotero records "this file has been uploaded to the configured
+    // remote backend" — populating them at row-creation time makes Zotero
+    // mark the row as syncState=IN_SYNC, so its sync engine never queues
+    // an upload. We want syncState=TO_UPLOAD so the desktop client picks
+    // up the local file from <storage_dir>/<key>/<filename> on its next
+    // sync pass and pushes it to whichever backend (Zotero cloud / WebDAV)
+    // the user has configured. Zotero sets md5/mtime/storageHash itself
+    // after a successful upload.
     let attach_key =
-        create_imported_attachment_row(api, parent_key, filename, content_type, &md5, mtime)
-            .await?;
+        create_imported_attachment_row(api, parent_key, filename, content_type).await?;
 
     let dest_dir = storage_dir.join(&attach_key);
     tokio::fs::create_dir_all(&dest_dir)
@@ -296,9 +278,9 @@ async fn create_imported_attachment_row(
     parent_key: &str,
     filename: &str,
     content_type: &str,
-    md5: &str,
-    mtime: u64,
 ) -> Result<String> {
+    // Deliberately omit md5/mtime/storageHash: see the syncState comment in
+    // attach_file_imported. Zotero populates these after upload.
     let body = json!([{
         "itemType": "attachment",
         "parentItem": parent_key,
@@ -307,8 +289,6 @@ async fn create_imported_attachment_row(
         "filename": filename,
         "contentType": content_type,
         "charset": "",
-        "md5": md5,
-        "mtime": mtime,
         "tags": [],
         "relations": {}
     }]);

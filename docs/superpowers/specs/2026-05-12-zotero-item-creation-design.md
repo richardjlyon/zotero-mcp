@@ -5,14 +5,23 @@
 **Author:** rjl
 **Component:** `zotero-mcp` — three new write tools (`create_item`, `attach_file`, `attach_link`)
 
-**Revision 2026-05-15:** `imported_file` mode rewritten in §5.1. The original
-documented three-step Web API upload protocol works only for users on Zotero's
-cloud file storage subscription; for users on WebDAV file sync, the cloud
-upload bytes never reached the desktop client's chosen backend, leaving the
-attachment row dead on arrival. The current path drops bytes into
-`<data_dir>/storage/<key>/<filename>` and lets the desktop sync engine push
-them to whichever backend (cloud / WebDAV / none) the user configured.
-Sections affected: §1.1, §5.1, §5.3 (deleted), §7, §8, §9.1.
+**Revision 2026-05-15 (morning):** `imported_file` mode rewritten in §5.1.
+The original documented three-step Web API upload protocol works only for
+users on Zotero's cloud file storage subscription; for users on WebDAV file
+sync, the cloud upload bytes never reached the desktop client's chosen
+backend, leaving the attachment row dead on arrival. The current path drops
+bytes into `<data_dir>/storage/<key>/<filename>` and lets the desktop sync
+engine push them to whichever backend (cloud / WebDAV / none) the user
+configured. Sections affected: §1.1, §5.1, §5.3 (rewritten), §7, §8, §9.1.
+
+**Revision 2026-05-15 (afternoon):** §5.1 row body must NOT include `md5`,
+`mtime`, or `storageHash`. The morning revision included `md5`/`mtime` to
+"flag the file as already-linked"; in Zotero's data model those fields
+mark the row `syncState = IN_SYNC`, so the sync engine concludes nothing
+needs uploading and the bytes never reach the configured backend. Recovery
+hit this after the bulk run: 577/578 attachments sitting at IN_SYNC with
+NULL storageHash, never queued for upload. Omitting the fields keeps the
+row in `syncState = TO_UPLOAD` (the default), which is what we want.
 
 ## 1. Overview
 
@@ -187,19 +196,21 @@ POST /users/<userID>/items
     "filename": "<filename>",
     "contentType": "application/pdf",
     "charset": "",
-    "md5": "<hex>",
-    "mtime": <unix-ms>,
     "tags": [],
     "relations": {}
   }
 ]
 ```
 
-The `md5` and `mtime` fields are populated up-front from the local file
-(computed once at the start of `attach_file`). With them present, Zotero
-treats the row as already-linked to the file we're about to drop, so the
-desktop client recognises the storage-dir contents on its next sync pass
-without an extra Web API roundtrip. Response → new `attachment_key`.
+**Critical: do NOT include `md5`, `mtime`, or `storageHash` in this body.**
+In Zotero's data model those fields record "this file has been uploaded
+to the configured remote backend" — setting them at row-creation time
+makes Zotero mark the row as `syncState = SYNC_STATE_IN_SYNC (2)`, and
+its sync engine then concludes "nothing to do" and never pushes the
+bytes to the configured backend (cloud or WebDAV). What we want is
+`syncState = SYNC_STATE_TO_UPLOAD (0)`, which is the default Zotero
+assigns when those fields are absent. Zotero populates them itself
+after a successful upload. Response → new `attachment_key`.
 
 **Step 5.1b — Drop the bytes into local storage:**
 

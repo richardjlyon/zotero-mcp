@@ -181,35 +181,21 @@ fn write_hello(dir: &std::path::Path) -> PathBuf {
     p
 }
 
-fn md5_hex(bytes: &[u8]) -> String {
-    use md5::{Digest, Md5};
-    let mut h = Md5::new();
-    h.update(bytes);
-    let digest = h.finalize();
-    let mut s = String::with_capacity(32);
-    for b in digest {
-        s.push_str(&format!("{:02x}", b));
-    }
-    s
-}
-
-// `attach_file(mode=imported_file)` creates the attachment row with
-// md5/mtime/filename pre-populated, then drops the bytes into
-// <storage_dir>/<attach_key>/<filename>. Zotero desktop's own sync engine
-// then pushes the file to whichever backend the user has configured
-// (Zotero cloud, WebDAV, or none) — we don't drive that ourselves.
+// `attach_file(mode=imported_file)` creates the attachment row WITHOUT
+// md5/mtime (those are populated by Zotero after it uploads to the
+// configured remote backend; setting them at row-creation time marks the
+// row as syncState=IN_SYNC and prevents Zotero from queuing the upload),
+// then drops the bytes into <storage_dir>/<attach_key>/<filename>. Zotero
+// desktop's sync engine picks up the file from there and pushes it to
+// whichever backend the user has configured (cloud / WebDAV / none).
 
 #[tokio::test]
-async fn imported_file_creates_row_with_md5_and_writes_bytes_to_storage() {
+async fn imported_file_creates_row_without_md5_and_writes_bytes_to_storage() {
     let src_dir = tempfile::tempdir().unwrap();
     let storage_dir = tempfile::tempdir().unwrap();
     let file_path = write_hello(src_dir.path());
-    let md5 = md5_hex(HELLO_PDF);
 
     let server = MockServer::start().await;
-    // Single POST: row creation carries md5 + mtime so Zotero treats the
-    // file as already-linked once it appears in storage. No second
-    // /file endpoint roundtrip.
     Mock::given(method("POST"))
         .and(path("/users/93338/items"))
         .and(body_partial_json(json!([{
@@ -218,7 +204,6 @@ async fn imported_file_creates_row_with_md5_and_writes_bytes_to_storage() {
             "linkMode": "imported_file",
             "filename": "hello.pdf",
             "contentType": "application/pdf",
-            "md5": md5,
         }])))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "successful": { "0": { "key": "ATT00001", "version": 1 } }
@@ -243,6 +228,28 @@ async fn imported_file_creates_row_with_md5_and_writes_bytes_to_storage() {
     let written = storage_dir.path().join("ATT00001").join("hello.pdf");
     assert!(written.exists(), "expected bytes at {}", written.display());
     assert_eq!(std::fs::read(&written).unwrap(), HELLO_PDF);
+
+    // Critical: md5 and mtime MUST NOT appear in the row body. Their
+    // presence makes Zotero mark the row syncState=IN_SYNC, so the desktop
+    // client never queues an upload to the configured remote backend
+    // (regression guard for the bug recovery hit on 2026-05-15).
+    let reqs = server.received_requests().await.unwrap();
+    let row_body: serde_json::Value = serde_json::from_slice(&reqs[0].body).unwrap();
+    let obj = row_body[0]
+        .as_object()
+        .expect("body is array of one object");
+    assert!(
+        !obj.contains_key("md5"),
+        "imported_file row body must not include md5; got {row_body:#}"
+    );
+    assert!(
+        !obj.contains_key("mtime"),
+        "imported_file row body must not include mtime; got {row_body:#}"
+    );
+    assert!(
+        !obj.contains_key("storageHash"),
+        "imported_file row body must not include storageHash; got {row_body:#}"
+    );
 }
 
 #[tokio::test]
