@@ -354,7 +354,7 @@ default `format="zotero"` will fail validation.
 | Tool | What it does |
 |------|--------------|
 | `create_item` | Create a new Zotero item from a JSON metadata object. The default-format output of `lookup_doi` / `lookup_isbn` / `lookup_arxiv` drops straight in with no transform |
-| `attach_file` | Attach a local file as a child of an item; supports `imported_file` (uploads bytes to Zotero cloud) and `linked_file` (path reference for BYO-storage setups like Resilio/Syncthing) |
+| `attach_file` | Attach a local file as a child of an item; supports `imported_file` (copies bytes into Zotero's managed `storage/<key>/` dir; desktop client syncs to your configured backend — cloud or WebDAV) and `linked_file` (path reference for BYO-storage setups like Resilio/Syncthing) |
 | `attach_link` | Attach a URL as a `linked_url` child (no bytes transfer) |
 | `add_note` | Markdown/HTML note attached to an item |
 | `update_item_fields` | Patch arbitrary fields (auto-detects version for `If-Unmodified-Since-Version`) |
@@ -419,9 +419,12 @@ pdftotext_fallback = true
 # instead of PATH lookup. Useful for non-standard installs.
 # pdftotext_path = "/opt/homebrew/bin/pdftotext"
 
-# attach_file storage mode. "imported_file" uploads bytes to Zotero's
-# cloud (Zotero's default); "linked_file" stores only a path reference
-# (BYO storage, e.g. Resilio Sync, Syncthing, NAS-backed Zotero).
+# attach_file storage mode. "imported_file" copies bytes into
+# <data_dir>/storage/<key>/<filename> — the same on-disk layout Zotero's
+# UI produces. Zotero desktop's sync engine then pushes the file to
+# whichever backend you have configured (Zotero cloud, WebDAV, or none).
+# "linked_file" stores only a path reference (BYO storage, e.g. Resilio
+# Sync, Syncthing, NAS-backed Zotero).
 attachment_mode = "imported_file"
 
 # Required when attachment_mode = "linked_file". Files attached via
@@ -513,13 +516,16 @@ private Funnel URL, a VPN, etc.). Run `zotero-mcp setup` to bootstrap
 the OAuth gate, or set `ZOTERO_MCP_OAUTH_ISSUER` in your daemon's
 environment and restart.
 
-**Library writes succeed via the API but the desktop client can't see
-the file**
-You probably uploaded in `imported_file` mode while your desktop is
-configured for BYO storage (no Zotero cloud file sync). Either enable
-Zotero's "Sync attachment files" preference, or use `linked_file` mode
-(set `attachment_mode = "linked_file"` and `linked_attachment_base_dir`
-to your Resilio/Syncthing folder).
+**`attach_file imported_file` succeeded but the file never appears on
+my Zotero cloud / WebDAV server**
+Bytes land at `<data_dir>/storage/<attachment_key>/<filename>` first;
+Zotero desktop's sync engine then pushes them to your configured
+backend on the next sync pass. Make sure Zotero desktop is running,
+"Sync attachment files" is enabled in Preferences → Sync, and trigger
+sync manually (⇧⌘S on macOS) if you're not seeing activity. Builds
+before 0.3.1 had a bug where the row landed at `syncState = IN_SYNC`
+and the sync engine never queued the upload — `cargo install
+zotero-mcp --force` to upgrade.
 
 ## Upgrading
 
