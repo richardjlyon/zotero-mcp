@@ -1,6 +1,6 @@
 use serde_json::json;
 use std::path::PathBuf;
-use wiremock::matchers::{body_partial_json, body_string_contains, header, method, path};
+use wiremock::matchers::{body_partial_json, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 use zotero_mcp::core::error::Error;
 use zotero_mcp::core::writer::attachments::{attach_file, AttachFileOptions, AttachmentMode};
@@ -45,6 +45,7 @@ async fn linked_file_inside_base_dir_posts_attachments_prefix_path() {
     let opts = AttachFileOptions {
         mode: AttachmentMode::LinkedFile,
         linked_attachment_base_dir: Some(dir.path().to_path_buf()),
+        storage_dir: PathBuf::from("/unused-for-linked-mode"),
         max_attachment_bytes: 50 * 1024 * 1024,
         filename: None,
         content_type: None,
@@ -68,6 +69,7 @@ async fn linked_file_outside_base_dir_errors_without_network() {
     let opts = AttachFileOptions {
         mode: AttachmentMode::LinkedFile,
         linked_attachment_base_dir: Some(base_dir.clone()),
+        storage_dir: PathBuf::from("/unused-for-linked-mode"),
         max_attachment_bytes: 50 * 1024 * 1024,
         filename: None,
         content_type: None,
@@ -109,6 +111,7 @@ async fn linked_file_without_base_dir_uses_absolute_path() {
     let opts = AttachFileOptions {
         mode: AttachmentMode::LinkedFile,
         linked_attachment_base_dir: None,
+        storage_dir: PathBuf::from("/unused-for-linked-mode"),
         max_attachment_bytes: 50 * 1024 * 1024,
         filename: None,
         content_type: None,
@@ -125,6 +128,7 @@ async fn attach_file_returns_not_found_for_missing_path() {
     let opts = AttachFileOptions {
         mode: AttachmentMode::LinkedFile,
         linked_attachment_base_dir: None,
+        storage_dir: PathBuf::from("/unused-for-linked-mode"),
         max_attachment_bytes: 50 * 1024 * 1024,
         filename: None,
         content_type: None,
@@ -149,6 +153,7 @@ async fn attach_file_returns_too_large_when_over_limit() {
     let opts = AttachFileOptions {
         mode: AttachmentMode::LinkedFile,
         linked_attachment_base_dir: None,
+        storage_dir: PathBuf::from("/unused-for-linked-mode"),
         max_attachment_bytes: 100, // tiny ceiling to force the check
         filename: None,
         content_type: None,
@@ -188,17 +193,23 @@ fn md5_hex(bytes: &[u8]) -> String {
     s
 }
 
+// `attach_file(mode=imported_file)` creates the attachment row with
+// md5/mtime/filename pre-populated, then drops the bytes into
+// <storage_dir>/<attach_key>/<filename>. Zotero desktop's own sync engine
+// then pushes the file to whichever backend the user has configured
+// (Zotero cloud, WebDAV, or none) — we don't drive that ourselves.
+
 #[tokio::test]
-async fn imported_file_md5_exists_short_circuits_upload() {
-    let dir = tempfile::tempdir().unwrap();
-    let file_path = write_hello(dir.path());
+async fn imported_file_creates_row_with_md5_and_writes_bytes_to_storage() {
+    let src_dir = tempfile::tempdir().unwrap();
+    let storage_dir = tempfile::tempdir().unwrap();
+    let file_path = write_hello(src_dir.path());
     let md5 = md5_hex(HELLO_PDF);
 
     let server = MockServer::start().await;
-
-    // Step 5.1a: create attachment item. md5/mtime are server-managed for
-    // imported_file mode — they MUST NOT be in this body; sending them makes
-    // Zotero treat the row as already-linked and the authorize step 412s.
+    // Single POST: row creation carries md5 + mtime so Zotero treats the
+    // file as already-linked once it appears in storage. No second
+    // /file endpoint roundtrip.
     Mock::given(method("POST"))
         .and(path("/users/93338/items"))
         .and(body_partial_json(json!([{
@@ -206,7 +217,8 @@ async fn imported_file_md5_exists_short_circuits_upload() {
             "parentItem": "PARENT01",
             "linkMode": "imported_file",
             "filename": "hello.pdf",
-            "contentType": "application/pdf"
+            "contentType": "application/pdf",
+            "md5": md5,
         }])))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "successful": { "0": { "key": "ATT00001", "version": 1 } }
@@ -214,20 +226,10 @@ async fn imported_file_md5_exists_short_circuits_upload() {
         .mount(&server)
         .await;
 
-    // Step 5.1b: authorize -> exists:1 short-circuit.
-    Mock::given(method("POST"))
-        .and(path("/users/93338/items/ATT00001/file"))
-        .and(header("If-None-Match", "*"))
-        .and(body_string_contains(format!("md5={md5}")))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "exists": 1 })))
-        .mount(&server)
-        .await;
-
-    // No step-5.1c PUT/register mocks — they must not be invoked.
-
     let opts = AttachFileOptions {
         mode: AttachmentMode::ImportedFile,
         linked_attachment_base_dir: None,
+        storage_dir: storage_dir.path().to_path_buf(),
         max_attachment_bytes: 50 * 1024 * 1024,
         filename: None,
         content_type: None,
@@ -236,81 +238,62 @@ async fn imported_file_md5_exists_short_circuits_upload() {
         .await
         .unwrap();
     assert_eq!(key, "ATT00001");
+
+    // Bytes land at <storage_dir>/<key>/<filename>, byte-identical to source.
+    let written = storage_dir.path().join("ATT00001").join("hello.pdf");
+    assert!(written.exists(), "expected bytes at {}", written.display());
+    assert_eq!(std::fs::read(&written).unwrap(), HELLO_PDF);
 }
 
 #[tokio::test]
-async fn imported_file_full_three_step_upload_succeeds() {
-    let dir = tempfile::tempdir().unwrap();
-    let file_path = write_hello(dir.path());
-    let md5 = md5_hex(HELLO_PDF);
+async fn imported_file_filename_override_used_for_both_row_and_storage() {
+    let src_dir = tempfile::tempdir().unwrap();
+    let storage_dir = tempfile::tempdir().unwrap();
+    let file_path = write_hello(src_dir.path());
 
     let server = MockServer::start().await;
-    let s3 = MockServer::start().await;
-
     Mock::given(method("POST"))
         .and(path("/users/93338/items"))
+        .and(body_partial_json(json!([{
+            "filename": "renamed.pdf",
+        }])))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "successful": { "0": { "key": "ATT00002", "version": 1 } }
         })))
         .mount(&server)
         .await;
 
-    // Step 5.1b: authorize -> returns upload URL pointing at the s3 mock.
-    let upload_url = format!("{}/upload", s3.uri());
-    Mock::given(method("POST"))
-        .and(path("/users/93338/items/ATT00002/file"))
-        .and(body_string_contains(format!("md5={md5}")))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "url": upload_url,
-            "contentType": "application/octet-stream",
-            "prefix": "PFX",
-            "suffix": "SFX",
-            "uploadKey": "UPLOADKEY"
-        })))
-        .mount(&server)
-        .await;
-
-    // Step 5.1c.upload: POST prefix + file_bytes + suffix (multipart/form-data
-    // framing supplied by the authorize step).
-    let mut expected_body = b"PFX".to_vec();
-    expected_body.extend_from_slice(HELLO_PDF);
-    expected_body.extend_from_slice(b"SFX");
-    Mock::given(method("POST"))
-        .and(path("/upload"))
-        .and(header("Content-Type", "application/octet-stream"))
-        .respond_with(ResponseTemplate::new(200))
-        .mount(&s3)
-        .await;
-
-    // Step 5.1c.register: POST with form body `upload=<key>` (NOT a query param).
-    Mock::given(method("POST"))
-        .and(path("/users/93338/items/ATT00002/file"))
-        .and(body_string_contains("upload=UPLOADKEY"))
-        .respond_with(ResponseTemplate::new(204))
-        .mount(&server)
-        .await;
-
     let opts = AttachFileOptions {
         mode: AttachmentMode::ImportedFile,
         linked_attachment_base_dir: None,
+        storage_dir: storage_dir.path().to_path_buf(),
         max_attachment_bytes: 50 * 1024 * 1024,
-        filename: None,
+        filename: Some("renamed.pdf".into()),
         content_type: None,
     };
     let key = attach_file(&api(&server.uri()), "PARENT01", &file_path, &opts)
         .await
         .unwrap();
     assert_eq!(key, "ATT00002");
+
+    // Override propagates to the on-disk name so it matches the row.
+    let written = storage_dir.path().join("ATT00002").join("renamed.pdf");
+    assert!(written.exists());
 }
 
 #[tokio::test]
-async fn imported_file_s3_put_failure_maps_to_upload_failed_stage_s3_put() {
-    let dir = tempfile::tempdir().unwrap();
-    let file_path = write_hello(dir.path());
+async fn imported_file_storage_write_failure_maps_to_upload_failed() {
+    let src_dir = tempfile::tempdir().unwrap();
+    let file_path = write_hello(src_dir.path());
+
+    // Construct an unmakeable storage_dir: a child of a regular file.
+    // create_dir_all will fail with NotADirectory.
+    let blocker_dir = tempfile::tempdir().unwrap();
+    let blocker_file = blocker_dir.path().join("file-not-a-dir");
+    std::fs::write(&blocker_file, b"blocker").unwrap();
+    let bad_storage = blocker_file.join("storage");
 
     let server = MockServer::start().await;
-    let s3 = MockServer::start().await;
-
     Mock::given(method("POST"))
         .and(path("/users/93338/items"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
@@ -318,26 +301,11 @@ async fn imported_file_s3_put_failure_maps_to_upload_failed_stage_s3_put() {
         })))
         .mount(&server)
         .await;
-    Mock::given(method("POST"))
-        .and(path("/users/93338/items/ATT00003/file"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "url": format!("{}/upload", s3.uri()),
-            "contentType": "application/octet-stream",
-            "prefix": "",
-            "suffix": "",
-            "uploadKey": "K"
-        })))
-        .mount(&server)
-        .await;
-    Mock::given(method("POST"))
-        .and(path("/upload"))
-        .respond_with(ResponseTemplate::new(500).set_body_string("S3 boom"))
-        .mount(&s3)
-        .await;
 
     let opts = AttachFileOptions {
         mode: AttachmentMode::ImportedFile,
         linked_attachment_base_dir: None,
+        storage_dir: bad_storage,
         max_attachment_bytes: 50 * 1024 * 1024,
         filename: None,
         content_type: None,
@@ -346,10 +314,12 @@ async fn imported_file_s3_put_failure_maps_to_upload_failed_stage_s3_put() {
         .await
         .unwrap_err();
     match err {
-        Error::UploadFailed { stage, detail } => {
-            assert_eq!(stage, "s3_put");
-            assert!(detail.contains("500") || detail.contains("S3 boom"));
+        Error::UploadFailed { stage, .. } => {
+            assert!(
+                stage == "create_storage_dir" || stage == "write_bytes",
+                "expected local-write stage, got {stage}"
+            );
         }
-        other => panic!("expected UploadFailed(stage=s3_put), got {:?}", other),
+        other => panic!("expected UploadFailed, got {:?}", other),
     }
 }

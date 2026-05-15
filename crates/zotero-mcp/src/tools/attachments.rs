@@ -231,6 +231,7 @@ pub async fn attach_file_t(
             .as_deref()
             .map(crate::core::config::expand_tilde)
             .map(PathBuf::from),
+        storage_dir: s.cfg.storage_dir(),
         max_attachment_bytes: cfg.max_attachment_bytes,
         filename: a.filename,
         content_type: a.content_type,

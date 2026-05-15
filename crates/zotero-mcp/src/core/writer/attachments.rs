@@ -3,7 +3,8 @@
 //! - [`attach_link`]: single POST that creates a `linked_url` child attachment
 //!   (URL only, no bytes).
 //! - [`attach_file`]: file-on-disk attachment, supporting both `imported_file`
-//!   (3-step upload to Zotero's cloud) and `linked_file` (path reference only).
+//!   (row + local storage write; desktop sync engine handles the file backend)
+//!   and `linked_file` (path reference only).
 
 use crate::core::error::{Error, Result};
 use crate::core::writer::client::LocalApi;
@@ -112,6 +113,12 @@ pub struct AttachFileOptions {
     /// The stored path uses Zotero's `attachments:<relative>` prefix so it
     /// can be resolved on any device that has the same base dir configured.
     pub linked_attachment_base_dir: Option<PathBuf>,
+    /// Required for `ImportedFile` mode: Zotero's resolved `storage/` directory
+    /// (typically `~/Zotero/storage`). `attach_file` drops bytes at
+    /// `<storage_dir>/<attach_key>/<filename>` and lets the desktop client's
+    /// sync engine push them to whichever file backend the user has configured
+    /// (Zotero cloud, WebDAV, or none). Unused for `LinkedFile` mode.
+    pub storage_dir: PathBuf,
     /// Pre-flight size cap (bytes). Requests exceeding this return
     /// [`Error::AttachmentTooLarge`] before any network call.
     pub max_attachment_bytes: usize,
@@ -170,7 +177,15 @@ pub async fn attach_file(
                     stage: "read",
                     detail: format!("reading {}: {}", file_path.display(), e),
                 })?;
-            attach_file_imported(api, parent_key, &bytes, &filename, &content_type).await
+            attach_file_imported(
+                api,
+                parent_key,
+                &bytes,
+                &filename,
+                &content_type,
+                &opts.storage_dir,
+            )
+            .await
         }
     }
 }
@@ -245,34 +260,35 @@ async fn attach_file_imported(
     bytes: &[u8],
     filename: &str,
     content_type: &str,
+    storage_dir: &Path,
 ) -> Result<String> {
     let md5 = md5_hex(bytes);
     let mtime = unix_ms_now();
-    let filesize = bytes.len();
 
-    // Step 5.1a: create the attachment row. md5/mtime are server-managed
-    // for imported_file mode — they get set during the upload protocol.
-    // Sending them here would make Zotero treat the row as already-linked,
-    // and the subsequent authorize step would 412 with `file exists`.
+    // Create the attachment row with md5 + mtime pre-populated so Zotero
+    // treats the file as already-linked once bytes appear under storage_dir.
+    // The desktop client's normal sync engine then pushes them to whichever
+    // file backend the user has configured (Zotero cloud, WebDAV, or none).
     let attach_key =
-        create_imported_attachment_row(api, parent_key, filename, content_type).await?;
+        create_imported_attachment_row(api, parent_key, filename, content_type, &md5, mtime)
+            .await?;
 
-    // Step 5.1b: authorize upload.
-    match authorize_upload(api, &attach_key, &md5, filename, filesize, mtime).await? {
-        AuthorizeResult::Exists => Ok(attach_key),
-        AuthorizeResult::NeedsUpload {
-            url,
-            content_type: upload_ct,
-            prefix,
-            suffix,
-            upload_key,
-        } => {
-            // Step 5.1c: PUT bytes to signed URL, then register upload.
-            put_to_s3(api, &url, &upload_ct, &prefix, bytes, &suffix).await?;
-            register_upload(api, &attach_key, &upload_key).await?;
-            Ok(attach_key)
-        }
-    }
+    let dest_dir = storage_dir.join(&attach_key);
+    tokio::fs::create_dir_all(&dest_dir)
+        .await
+        .map_err(|e| Error::UploadFailed {
+            stage: "create_storage_dir",
+            detail: format!("creating {}: {}", dest_dir.display(), e),
+        })?;
+    let dest_file = dest_dir.join(filename);
+    tokio::fs::write(&dest_file, bytes)
+        .await
+        .map_err(|e| Error::UploadFailed {
+            stage: "write_bytes",
+            detail: format!("writing {}: {}", dest_file.display(), e),
+        })?;
+
+    Ok(attach_key)
 }
 
 async fn create_imported_attachment_row(
@@ -280,6 +296,8 @@ async fn create_imported_attachment_row(
     parent_key: &str,
     filename: &str,
     content_type: &str,
+    md5: &str,
+    mtime: u64,
 ) -> Result<String> {
     let body = json!([{
         "itemType": "attachment",
@@ -289,6 +307,8 @@ async fn create_imported_attachment_row(
         "filename": filename,
         "contentType": content_type,
         "charset": "",
+        "md5": md5,
+        "mtime": mtime,
         "tags": [],
         "relations": {}
     }]);
@@ -315,158 +335,4 @@ async fn create_imported_attachment_row(
             status: status.as_u16(),
             body: v.to_string(),
         })
-}
-
-enum AuthorizeResult {
-    Exists,
-    NeedsUpload {
-        url: String,
-        content_type: String,
-        prefix: String,
-        suffix: String,
-        upload_key: String,
-    },
-}
-
-async fn authorize_upload(
-    api: &LocalApi,
-    attach_key: &str,
-    md5: &str,
-    filename: &str,
-    filesize: usize,
-    mtime: u64,
-) -> Result<AuthorizeResult> {
-    let body = format!(
-        "md5={md5}&filename={fn_enc}&filesize={size}&mtime={mtime}",
-        fn_enc = urlencoding::encode(filename),
-        size = filesize,
-    );
-    let resp = api
-        .write_request(Method::POST, &format!("/items/{attach_key}/file"))?
-        .header("Content-Type", "application/x-www-form-urlencoded")
-        .header("If-None-Match", "*")
-        .body(body)
-        .send()
-        .await
-        .map_err(|e| Error::UploadFailed {
-            stage: "authorize",
-            detail: e.to_string(),
-        })?;
-    let status = resp.status();
-    let v: Value = resp.json().await.map_err(|e| Error::UploadFailed {
-        stage: "authorize",
-        detail: format!("non-JSON response: {}", e),
-    })?;
-    if !status.is_success() {
-        return Err(Error::UploadFailed {
-            stage: "authorize",
-            detail: format!("{}: {}", status, v),
-        });
-    }
-    if v.get("exists").and_then(|x| x.as_i64()) == Some(1) {
-        return Ok(AuthorizeResult::Exists);
-    }
-    let url = v
-        .get("url")
-        .and_then(|x| x.as_str())
-        .ok_or_else(|| Error::UploadFailed {
-            stage: "authorize",
-            detail: format!("missing url in response: {}", v),
-        })?
-        .to_string();
-    let content_type = v
-        .get("contentType")
-        .and_then(|x| x.as_str())
-        .unwrap_or("application/octet-stream")
-        .to_string();
-    let prefix = v
-        .get("prefix")
-        .and_then(|x| x.as_str())
-        .unwrap_or("")
-        .to_string();
-    let suffix = v
-        .get("suffix")
-        .and_then(|x| x.as_str())
-        .unwrap_or("")
-        .to_string();
-    let upload_key = v
-        .get("uploadKey")
-        .and_then(|x| x.as_str())
-        .ok_or_else(|| Error::UploadFailed {
-            stage: "authorize",
-            detail: format!("missing uploadKey in response: {}", v),
-        })?
-        .to_string();
-    Ok(AuthorizeResult::NeedsUpload {
-        url,
-        content_type,
-        prefix,
-        suffix,
-        upload_key,
-    })
-}
-
-async fn put_to_s3(
-    api: &LocalApi,
-    url: &str,
-    content_type: &str,
-    prefix: &str,
-    bytes: &[u8],
-    suffix: &str,
-) -> Result<()> {
-    let mut body = Vec::with_capacity(prefix.len() + bytes.len() + suffix.len());
-    body.extend_from_slice(prefix.as_bytes());
-    body.extend_from_slice(bytes);
-    body.extend_from_slice(suffix.as_bytes());
-
-    // Per Zotero's documented protocol: POST (not PUT) the prefix+bytes+suffix
-    // body to the storage URL. The authorize step's returned `contentType` is
-    // `multipart/form-data; boundary=...` — the prefix/suffix already contain
-    // the form-data framing.
-    let resp = api
-        .http
-        .post(url)
-        .header("Content-Type", content_type)
-        .body(body)
-        .send()
-        .await
-        .map_err(|e| Error::UploadFailed {
-            stage: "s3_put",
-            detail: e.to_string(),
-        })?;
-    let status = resp.status();
-    if !status.is_success() {
-        let detail = resp.text().await.unwrap_or_default();
-        return Err(Error::UploadFailed {
-            stage: "s3_put",
-            detail: format!("{}: {}", status, detail),
-        });
-    }
-    Ok(())
-}
-
-async fn register_upload(api: &LocalApi, attach_key: &str, upload_key: &str) -> Result<()> {
-    // Per Zotero protocol: uploadKey goes in the form-encoded body, NOT the
-    // URL query. Sending it as `?upload=...` yields 400 "POST data not provided".
-    let body = format!("upload={}", urlencoding::encode(upload_key));
-    let resp = api
-        .write_request(Method::POST, &format!("/items/{attach_key}/file"))?
-        .header("Content-Type", "application/x-www-form-urlencoded")
-        .header("If-None-Match", "*")
-        .body(body)
-        .send()
-        .await
-        .map_err(|e| Error::UploadFailed {
-            stage: "register",
-            detail: e.to_string(),
-        })?;
-    let status = resp.status();
-    if !status.is_success() {
-        let detail = resp.text().await.unwrap_or_default();
-        return Err(Error::UploadFailed {
-            stage: "register",
-            detail: format!("{}: {}", status, detail),
-        });
-    }
-    Ok(())
 }

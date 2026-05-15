@@ -5,6 +5,15 @@
 **Author:** rjl
 **Component:** `zotero-mcp` — three new write tools (`create_item`, `attach_file`, `attach_link`)
 
+**Revision 2026-05-15:** `imported_file` mode rewritten in §5.1. The original
+documented three-step Web API upload protocol works only for users on Zotero's
+cloud file storage subscription; for users on WebDAV file sync, the cloud
+upload bytes never reached the desktop client's chosen backend, leaving the
+attachment row dead on arrival. The current path drops bytes into
+`<data_dir>/storage/<key>/<filename>` and lets the desktop sync engine push
+them to whichever backend (cloud / WebDAV / none) the user configured.
+Sections affected: §1.1, §5.1, §5.3 (deleted), §7, §8, §9.1.
+
 ## 1. Overview
 
 `zotero-mcp` can mutate existing Zotero items (notes, tags, fields, collection
@@ -18,8 +27,10 @@ a PDF on disk, a DOI, a URL, or just a metadata blob.
   Zotero-shaped JSON that `lookup_doi` / `search_crossref` etc. already
   return. No new schema to learn.
 - One primitive to attach a local file (`attach_file`), supporting both of
-  Zotero's local-file modes: `imported_file` (bytes go to Zotero cloud) and
-  `linked_file` (BYO-storage / Resilio / Syncthing).
+  Zotero's local-file modes: `imported_file` (bytes copied into
+  `<data_dir>/storage/<key>/<filename>`; Zotero desktop's sync engine then
+  pushes to whichever file backend the user has configured) and `linked_file`
+  (BYO-storage / Resilio / Syncthing — Zotero stores only a path reference).
 - One primitive to attach a URL as a child link (`attach_link`).
 - Each primitive small, sharp, testable; workflow composition stays Claude-side.
 
@@ -157,7 +168,11 @@ upload mechanism.
 
 ### 5.1 `mode = "imported_file"` (Zotero's default)
 
-The Zotero documented three-step path against `api.zotero.org`.
+Two steps. One POST to register the attachment, one local-disk write to
+place the bytes where Zotero's desktop client expects them. The desktop's
+own sync engine then pushes the file to whichever backend the user has
+configured in Zotero Preferences → Sync → File Syncing (Zotero cloud,
+WebDAV, or no remote sync).
 
 **Step 5.1a — Register the attachment item:**
 
@@ -173,58 +188,47 @@ POST /users/<userID>/items
     "contentType": "application/pdf",
     "charset": "",
     "md5": "<hex>",
-    "mtime": <unix-ms>
+    "mtime": <unix-ms>,
+    "tags": [],
+    "relations": {}
   }
 ]
 ```
 
 The `md5` and `mtime` fields are populated up-front from the local file
-(computed once at the start of `attach_file`). Response → new `attachment_key`.
+(computed once at the start of `attach_file`). With them present, Zotero
+treats the row as already-linked to the file we're about to drop, so the
+desktop client recognises the storage-dir contents on its next sync pass
+without an extra Web API roundtrip. Response → new `attachment_key`.
 
-**Step 5.1b — Authorize the upload:**
-
-```
-POST /users/<userID>/items/<attachment_key>/file
-Content-Type: application/x-www-form-urlencoded
-If-None-Match: *
-Body: md5=<hex>&filename=<name>&filesize=<bytes>&mtime=<unix-ms>
-```
-
-Two possible responses:
-
-- `{ "exists": 1 }` — Zotero already has this byte-identical file by md5.
-  **Short-circuit done**; no upload performed. Patch the attachment with
-  md5/mtime/filename and return.
-- `{ "url", "contentType", "prefix", "suffix", "uploadKey" }` — signed URL
-  for the upload.
-
-**Step 5.1c — Upload the bytes (only when needed):**
+**Step 5.1b — Drop the bytes into local storage:**
 
 ```
-PUT <url>
-Content-Type: <returned content type>
-Body: prefix + file_bytes + suffix
+mkdir -p  <data_dir>/storage/<attachment_key>/
+write     <data_dir>/storage/<attachment_key>/<filename>
 ```
 
-Then register the completed upload:
-
-```
-POST /users/<userID>/items/<attachment_key>/file?upload=<uploadKey>
-If-None-Match: *
-```
-
-A 204 means done.
+`<data_dir>` resolves from `cfg.zotero.data_dir` (default `~/Zotero`,
+exposed in code as `cfg.storage_dir()`). That's the same on-disk layout
+Zotero's own UI produces when you "Add Attachment from File", which is
+why the desktop client picks it up uniformly across cloud and WebDAV
+configurations.
 
 **Practical points:**
 
-- File md5 computed once at the start; reused in 5.1a / 5.1b / 5.1c.
-- `prefix` and `suffix` are S3 multipart-form bookends concatenated raw with
-  the file bytes. Not headers — literal body bytes. Easy to get wrong; the
-  unit tests for this branch capture a real PUT body and assert byte exactness.
+- Idempotent within a run: if `create_dir_all` runs against an existing
+  directory it's a no-op, and `write` truncates/overwrites cleanly.
 - 50 MB hard cap on `file_path` size for sanity. Configurable via
   `cfg.zotero.max_attachment_bytes` (default `50 * 1024 * 1024`).
-- The whole sequence is **idempotent on md5**: re-running an interrupted
-  attach with the same file produces `"exists": 1` at step 5.1b.
+- We do not drive the upload to the user's file backend ourselves —
+  Zotero's sync logic is the single source of truth for backend choice,
+  and replicating it here would mean parsing Zotero prefs for WebDAV
+  URL/credentials, handling cloud-quota responses, etc. The desktop
+  client already does this correctly.
+- The MCP requires Zotero desktop running on the host (the read side
+  already depends on `localhost:23119`, the bundled HTTP server). So
+  "desktop client will pick up the file on next sync" is not an extra
+  constraint — it's the existing operating assumption.
 
 ### 5.2 `mode = "linked_file"` (BYO storage)
 
@@ -263,21 +267,24 @@ replicate to other Zotero clients. Zotero allows absolute paths but doesn't
 recommend them — this preserves the published-crate use case for users who
 prefer absolute paths and accept the trade-off.
 
-### 5.3 Alternative considered: local-storage shortcut
+### 5.3 Alternative considered: drive the file-backend upload directly
 
-For users running Zotero desktop locally, we could skip the documented S3
-path entirely for `imported_file` mode:
+We could have the MCP push bytes to the user's chosen backend itself —
+PUT to Zotero cloud S3 via the documented three-step Web API protocol,
+or PUT to WebDAV via a separate code path that reads Zotero's WebDAV
+prefs.
 
-1. Create the attachment item via Web API (just step 5.1a, with the md5).
-2. Drop the file in `~/Zotero/storage/<attachment_key>/<filename>` directly.
-3. Let Zotero desktop pick it up on next sync.
+**Rejected** because it doubles the surface area (two upload protocols,
+two failure modes, configuration discovery for WebDAV creds) for zero
+gain over letting Zotero's own sync engine do it. The single
+local-storage write covers both audiences uniformly, and the desktop
+client's sync logic is already battle-tested.
 
-Faster (no S3 upload), but **rejected** because: (a) undocumented Zotero
-behaviour, (b) requires Zotero desktop running on the host, (c) skips
-Zotero's own indexer pipeline so full-text search may not pick the file up
-until next desktop pass, (d) doesn't generalise to remote / cloud-only
-users of the crate. The documented path is solid and matches what every
-other Zotero client uses.
+A cloud-only-S3 variant of this alternative (no WebDAV) was the
+original 2026-05-12 design. It was withdrawn 2026-05-15 after a
+real-world report from a WebDAV-configured user where the cloud upload
+succeeded but bytes never reached the local client — see this spec's
+revision note for full context.
 
 ## 6. Configuration
 
@@ -326,9 +333,10 @@ UploadFailed { stage: &'static str, detail: String },
 AttachmentTooLarge { file_path: PathBuf, limit: usize },
 ```
 
-`stage` takes one of three string literals — `"authorize"`, `"s3_put"`,
-`"register"` — so callers (and humans) can tell which step of the
-three-step upload tripped.
+`stage` takes one of three string literals — `"read"`,
+`"create_storage_dir"`, `"write_bytes"` — covering source-file read,
+target-directory creation under `<data_dir>/storage/`, and the bytes
+write itself.
 
 **Reused (no change):**
 
@@ -359,8 +367,9 @@ Using the existing `tracing` setup:
   with the resulting key. Matches the existing write-tool log pattern.
 - `WARN` if `attach_file(mode=linked_file)` falls back to an absolute path
   because `linked_attachment_base_dir` isn't configured.
-- `DEBUG` for per-step upload progression on `imported_file` (authorize →
-  s3_put → register) — useful when debugging an interrupted upload.
+- `DEBUG` for per-step progression on `imported_file` (row registered →
+  storage dir created → bytes written) — useful when debugging a failed
+  attach that left a half-created row.
 
 ## 9. Testing Strategy
 
@@ -379,15 +388,16 @@ Each tool gets unit tests that stand a wiremock server in for
 
 **`attach_file (mode = "imported_file")`:**
 
-- Three sequential mocks (authorize → s3 PUT → register); test asserts each
-  is called in order with the right md5/filename/filesize.
-- `"exists": 1` short-circuit path: only steps 5.1a + 5.1b are hit; 5.1c is
-  asserted *not* called.
-- md5 computed from a fixture file matches what's sent in 5.1b.
-- Failure at each stage maps to `UploadFailed { stage: ..., detail: ... }`
-  with the right stage label.
-- Body validation: PUT body equals `prefix + file_bytes + suffix` (one
-  assertion against a captured request).
+- Single mock asserts the row-create POST body carries `md5`, `mtime`,
+  `filename`, and `linkMode: imported_file`.
+- After the call returns, bytes exist on disk at
+  `<storage_dir>/<attach_key>/<filename>` and are byte-identical to the
+  source.
+- `filename` override propagates to both the row's `filename` field and
+  the on-disk filename (so the desktop client matches the row to the
+  file).
+- Local-write failure (storage_dir can't be created) surfaces as
+  `UploadFailed { stage: "create_storage_dir" | "write_bytes", detail }`.
 - Size cap: a file larger than `max_attachment_bytes` returns
   `Error::AttachmentTooLarge` with no network call.
 
@@ -476,7 +486,7 @@ following are true:
 - `crates/zotero-mcp/src/core/config.rs` — three new `[zotero]` knobs.
 - `crates/zotero-mcp/src/core/writer/items.rs` — `create_item` function.
 - `crates/zotero-mcp/src/core/writer/attachments.rs` (new) — `attach_file`,
-  `attach_link`, the md5 helper, the three-step upload state machine.
+  `attach_link`, the md5 helper, the local-storage write for `imported_file`.
 - `crates/zotero-mcp/src/core/writer/mod.rs` — module wire-up.
 - `crates/zotero-mcp/src/tools/attachments.rs` — three new tool entry points.
 - `crates/zotero-mcp/src/server.rs` — `#[tool]` declarations and descriptions.

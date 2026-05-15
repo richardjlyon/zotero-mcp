@@ -67,10 +67,14 @@ async fn live_create_item_attach_file_attach_link_roundtrip() {
     println!("created parent: {parent_key}");
 
     // Step 2: attach_file (imported_file). Uses the committed hello.pdf fixture.
+    // Live test writes into the user's actual ~/Zotero/storage so Zotero
+    // desktop picks up the bytes via its normal sync engine.
     let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/hello.pdf");
+    let home = env::var("HOME").expect("HOME must be set for live test");
     let opts = AttachFileOptions {
         mode: AttachmentMode::ImportedFile,
         linked_attachment_base_dir: None,
+        storage_dir: PathBuf::from(home).join("Zotero").join("storage"),
         max_attachment_bytes: 50 * 1024 * 1024,
         filename: None,
         content_type: None,
@@ -185,6 +189,7 @@ async fn live_attach_file_linked_file_roundtrip() {
     let opts = AttachFileOptions {
         mode: AttachmentMode::LinkedFile,
         linked_attachment_base_dir: Some(dir.path().to_path_buf()),
+        storage_dir: PathBuf::from("/unused-for-linked-mode"),
         max_attachment_bytes: 50 * 1024 * 1024,
         filename: None,
         content_type: None,
