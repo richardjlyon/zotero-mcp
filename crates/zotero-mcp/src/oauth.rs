@@ -720,6 +720,11 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 ///
 /// Routes:
 ///   - `GET /.well-known/oauth-authorization-server` — RFC 8414 metadata
+///   - `GET /.well-known/openid-configuration`        — alias of the above, for
+///     OIDC-flavored clients (notably Claude.ai's connector) that probe the
+///     OIDC discovery suffix when the issuer URL has a path component. Root
+///     issuers don't currently trigger this probe, but landing the alias
+///     defensively keeps us from breaking the day Anthropic changes that.
 ///   - `GET /.well-known/oauth-protected-resource`    — RFC 9728 metadata
 ///   - `GET /authorize`                               — auth-code start (PKCE)
 ///   - `POST /oauth/token`                            — token issuance
@@ -727,6 +732,10 @@ pub fn router(state: OAuthState) -> Router {
     Router::new()
         .route(
             "/.well-known/oauth-authorization-server",
+            get(authorization_server_metadata),
+        )
+        .route(
+            "/.well-known/openid-configuration",
             get(authorization_server_metadata),
         )
         .route(
