@@ -3,3 +3,6 @@ target/
 .DS_Store
 /zotero-mcp.log
 **/.zotero-mcp-cache/
+
+.cowork/
+.claude/

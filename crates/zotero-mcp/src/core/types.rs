@@ -2,6 +2,17 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+// `serde_json::Value` derives a boolean schema (`true`) under schemars, which
+// some MCP clients (e.g. Claude Code's tool-schema validator) reject when it
+// appears as a property value. Emit object-form schemas instead.
+fn schema_any(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({})
+}
+
+fn schema_object(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({ "type": "object" })
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Item {
     pub key: String,
@@ -10,6 +21,7 @@ pub struct Item {
     pub item_type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub citation_key: Option<String>,
+    #[schemars(schema_with = "schema_object")]
     pub fields: Value,
     pub creators: Vec<Creator>,
     pub tags: Vec<String>,
@@ -116,7 +128,9 @@ pub struct Diff {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct FieldChange {
     pub field: String,
+    #[schemars(schema_with = "schema_any")]
     pub current: Option<Value>,
+    #[schemars(schema_with = "schema_any")]
     pub proposed: Value,
 }
 
