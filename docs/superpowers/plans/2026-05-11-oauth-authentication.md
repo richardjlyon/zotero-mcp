@@ -18,7 +18,7 @@ Claude.ai's connector dialog has fields for **OAuth Client ID** and **OAuth Clie
 
 ## Current state at session start
 
-- Repo root: `/Users/rjl/Code/github/zotero-connector`
+- Repo root: `/Users/rjl/Code/mcp-zotero`
 - Server installed at: `/Users/rjl/.cargo/bin/zotero-mcp`
 - Running under launchd: `~/Library/LaunchAgents/com.zotero-mcp.http.plist`
   - Env vars: `ZOTERO_MCP_HTTP=127.0.0.1:8765`, `RUST_LOG=info,tower_http=debug`

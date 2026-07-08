@@ -32,7 +32,7 @@ Per plan-time research (reqwest CHANGELOG, toml CHANGELOG), only the workspace `
 
 - [ ] **Step 1: Confirm clean tree on `main`**
 
-Run: `cd /Users/rjl/Code/github/zotero-connector && git status`
+Run: `cd /Users/rjl/Code/mcp-zotero && git status`
 
 Expected: `nothing to commit, working tree clean` and branch `main`.
 
@@ -40,13 +40,13 @@ If dirty, stop and resolve before starting the slice.
 
 - [ ] **Step 2: Capture baseline test results**
 
-Run: `cd /Users/rjl/Code/github/zotero-connector && cargo test -p zotero-mcp 2>&1 | grep "^test result:" | sort | uniq -c`
+Run: `cd /Users/rjl/Code/mcp-zotero && cargo test -p zotero-mcp 2>&1 | grep "^test result:" | sort | uniq -c`
 
 Expected: every line shows `ok`, no `FAILED`. Lib tests should still be `105 passed; 0 failed` (the Slice A baseline). Note this so regressions are visible.
 
 - [ ] **Step 3: Record the current pre-flight SHA**
 
-Run: `cd /Users/rjl/Code/github/zotero-connector && git rev-parse HEAD`
+Run: `cd /Users/rjl/Code/mcp-zotero && git rev-parse HEAD`
 
 Write down the SHA. This is the rollback point if a single bump goes wrong. Expected at slice start: `a30e82e` (the Slice B spec commit) — or, if Slice B is being re-run after a checkpoint, whatever the current HEAD is.
 
@@ -83,7 +83,7 @@ Write down the SHA. This is the rollback point if a single bump goes wrong. Expe
 
 - [ ] **Step 1: Bump the version and update features in workspace `Cargo.toml`**
 
-In `/Users/rjl/Code/github/zotero-connector/Cargo.toml`, find line 20:
+In `/Users/rjl/Code/mcp-zotero/Cargo.toml`, find line 20:
 
 ```toml
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "gzip", "brotli"] }
@@ -101,13 +101,13 @@ Two changes in one line:
 
 - [ ] **Step 2: Update the lockfile**
 
-Run: `cd /Users/rjl/Code/github/zotero-connector && cargo update -p reqwest`
+Run: `cd /Users/rjl/Code/mcp-zotero && cargo update -p reqwest`
 
 Expected: `Updating reqwest v0.12.28 -> v0.13.x` plus a cloud of transitive updates — most notably the `aws-lc-*` family appearing (new default crypto provider) and possibly `ring` exiting if not held by other deps.
 
 - [ ] **Step 3: Build**
 
-Run: `cd /Users/rjl/Code/github/zotero-connector && cargo build -p zotero-mcp 2>&1 | tail -30`
+Run: `cd /Users/rjl/Code/mcp-zotero && cargo build -p zotero-mcp 2>&1 | tail -30`
 
 Expected: PASS based on plan-time research. If errors, continue to Step 4.
 
@@ -127,13 +127,13 @@ Re-run Step 3 after each fix attempt. Loop until clean.
 
 - [ ] **Step 5: Run the full test suite**
 
-Run: `cd /Users/rjl/Code/github/zotero-connector && cargo test -p zotero-mcp 2>&1 | tail -20`
+Run: `cd /Users/rjl/Code/mcp-zotero && cargo test -p zotero-mcp 2>&1 | tail -20`
 
 Expected: PASS. Lib tests still `105 passed; 0 failed`.
 
 - [ ] **Step 6: Review the lockfile diff**
 
-Run: `cd /Users/rjl/Code/github/zotero-connector && git diff Cargo.lock | grep -E "^[-+]name|^[-+]version" | head -60`
+Run: `cd /Users/rjl/Code/mcp-zotero && git diff Cargo.lock | grep -E "^[-+]name|^[-+]version" | head -60`
 
 Expected updates and disappearances:
 - `reqwest` 0.12.28 → 0.13.x
@@ -148,7 +148,7 @@ Flag anything outside the HTTP-client / crypto / DNS domain as a surprise in the
 
 Run:
 ```bash
-cd /Users/rjl/Code/github/zotero-connector && \
+cd /Users/rjl/Code/mcp-zotero && \
 git add Cargo.toml Cargo.lock \
   crates/zotero-mcp/src/state.rs \
   crates/zotero-mcp/src/core/bbt.rs \
@@ -229,7 +229,7 @@ The `toml::de::Error` type was NOT flagged as renamed in the changelog. Defensiv
 
 - [ ] **Step 1: Bump the version in workspace `Cargo.toml`**
 
-In `/Users/rjl/Code/github/zotero-connector/Cargo.toml`, find line 27:
+In `/Users/rjl/Code/mcp-zotero/Cargo.toml`, find line 27:
 
 ```toml
 toml = "0.8"
@@ -245,13 +245,13 @@ toml = "1"
 
 - [ ] **Step 2: Update the lockfile**
 
-Run: `cd /Users/rjl/Code/github/zotero-connector && cargo update -p toml`
+Run: `cd /Users/rjl/Code/mcp-zotero && cargo update -p toml`
 
 Expected: `Updating toml v0.8.23 -> v1.1.x` plus possible bumps to `toml_edit`, `toml_datetime` siblings.
 
 - [ ] **Step 3: Build**
 
-Run: `cd /Users/rjl/Code/github/zotero-connector && cargo build -p zotero-mcp 2>&1 | tail -30`
+Run: `cd /Users/rjl/Code/mcp-zotero && cargo build -p zotero-mcp 2>&1 | tail -30`
 
 Expected: PASS. If errors, continue to Step 4.
 
@@ -269,7 +269,7 @@ Re-run Step 3 after each fix attempt. Loop until clean.
 - [ ] **Step 5: Run the targeted config + oauth tests, then the full suite**
 
 ```bash
-cd /Users/rjl/Code/github/zotero-connector && \
+cd /Users/rjl/Code/mcp-zotero && \
 cargo test -p zotero-mcp config 2>&1 | tail -10 && \
 cargo test -p zotero-mcp oauth 2>&1 | tail -10 && \
 cargo test -p zotero-mcp 2>&1 | tail -10
@@ -279,14 +279,14 @@ Expected: all three commands PASS. The targeted runs exercise the config-parse a
 
 - [ ] **Step 6: Review the lockfile diff**
 
-Run: `cd /Users/rjl/Code/github/zotero-connector && git diff Cargo.lock | grep -E "^[-+]name|^[-+]version" | head -20`
+Run: `cd /Users/rjl/Code/mcp-zotero && git diff Cargo.lock | grep -E "^[-+]name|^[-+]version" | head -20`
 
 Expected: just `toml` 0.8.x → 1.x and possibly `toml_edit` / `toml_datetime` patch updates. Anything else is a surprise — note it in the commit body.
 
 - [ ] **Step 7: Commit**
 
 ```bash
-cd /Users/rjl/Code/github/zotero-connector && \
+cd /Users/rjl/Code/mcp-zotero && \
 git add Cargo.toml Cargo.lock \
   crates/zotero-mcp/src/core/error.rs \
   crates/zotero-mcp/src/oauth.rs \
@@ -325,7 +325,7 @@ After both tasks land (or whichever survived without escalating):
 
 - [ ] **Step 1: Rebuild and install**
 
-Run: `cd /Users/rjl/Code/github/zotero-connector && cargo install --path crates/zotero-mcp 2>&1 | tail -3`
+Run: `cd /Users/rjl/Code/mcp-zotero && cargo install --path crates/zotero-mcp 2>&1 | tail -3`
 
 Expected: `Replacing /Users/rjl/.cargo/bin/zotero-mcp` with the new version.
 

@@ -36,7 +36,7 @@ Decomposition rationale: `bearer.rs` has one clear responsibility (the WWW-Authe
 
 - [ ] **Step 1: Confirm clean tree on `main`**
 
-Run: `cd /Users/rjl/Code/github/zotero-connector && git status`
+Run: `cd /Users/rjl/Code/mcp-zotero && git status`
 
 Expected: `nothing to commit, working tree clean` and branch `main`.
 
@@ -44,13 +44,13 @@ If dirty, stop and resolve before starting the slice.
 
 - [ ] **Step 2: Capture baseline test results**
 
-Run: `cd /Users/rjl/Code/github/zotero-connector && cargo test -p zotero-mcp 2>&1 | grep "^test result:" | sort | uniq -c`
+Run: `cd /Users/rjl/Code/mcp-zotero && cargo test -p zotero-mcp 2>&1 | grep "^test result:" | sort | uniq -c`
 
 Expected: every line `ok`, no `FAILED`. Lib tests should be `105 passed; 0 failed` (the Slice C baseline). Write the number down — Slice E's lib-test count may shift by -1 to ±0 (remove 2 SSE-routing tests, gain 1-2 smoke tests + the 3 moved bearer tests; net delta documented in the commit body).
 
 - [ ] **Step 3: Record the pre-flight SHA**
 
-Run: `cd /Users/rjl/Code/github/zotero-connector && git rev-parse HEAD`
+Run: `cd /Users/rjl/Code/mcp-zotero && git rev-parse HEAD`
 
 Write down the SHA. This is the rollback point if the slice escalates. Expected at slice start: `6f1599a` (the Slice E spec commit) — or, if the slice is re-run after a checkpoint, whatever the current HEAD is.
 
@@ -86,7 +86,7 @@ Record what you find. The remaining steps reference these names; if any differs 
 
 ### Step 2: Add the rmcp feature flag
 
-In `/Users/rjl/Code/github/zotero-connector/Cargo.toml`, find line 21:
+In `/Users/rjl/Code/mcp-zotero/Cargo.toml`, find line 21:
 
 ```toml
 rmcp = { version = "1", features = ["server", "macros", "schemars", "transport-io"] }
@@ -102,7 +102,7 @@ rmcp = { version = "1", features = ["server", "macros", "schemars", "transport-i
 
 ### Step 3: Update the lockfile
 
-Run: `cd /Users/rjl/Code/github/zotero-connector && cargo update -p rmcp 2>&1 | tail -10`
+Run: `cd /Users/rjl/Code/mcp-zotero && cargo update -p rmcp 2>&1 | tail -10`
 
 (This may produce no version change if rmcp 1.7.0 is already the resolved version — that's fine. The lockfile churn happens at the next `cargo build` because the new feature pulls in transitive deps.)
 
@@ -277,7 +277,7 @@ Notes:
 
 ### Step 5: Move `tokens_survive_oauth_state_recreation` to `oauth/token_store.rs`'s tests
 
-Open `/Users/rjl/Code/github/zotero-connector/crates/zotero-mcp/src/oauth/token_store.rs`. If it already has a `#[cfg(test)]` mod tests block, add this test to it. If not, add a new test module at the bottom.
+Open `/Users/rjl/Code/mcp-zotero/crates/zotero-mcp/src/oauth/token_store.rs`. If it already has a `#[cfg(test)]` mod tests block, add this test to it. If not, add a new test module at the bottom.
 
 Test body (copied verbatim from `http_transport.rs`):
 
@@ -320,7 +320,7 @@ If the `imports` at the top of the existing test mod conflict, just rely on the 
 
 ### Step 6: Add `pub mod bearer;` to lib.rs
 
-Open `/Users/rjl/Code/github/zotero-connector/crates/zotero-mcp/src/lib.rs`. Locate the existing `pub mod http_transport;` line. Add immediately above or below:
+Open `/Users/rjl/Code/mcp-zotero/crates/zotero-mcp/src/lib.rs`. Locate the existing `pub mod http_transport;` line. Add immediately above or below:
 
 ```rust
 pub mod bearer;
@@ -524,7 +524,7 @@ Notes on the rewrite:
 
 ### Step 8: First build, expect compile errors
 
-Run: `cd /Users/rjl/Code/github/zotero-connector && cargo build -p zotero-mcp 2>&1 | tail -50`
+Run: `cd /Users/rjl/Code/mcp-zotero && cargo build -p zotero-mcp 2>&1 | tail -50`
 
 Expected outcomes (in likely order):
 
@@ -542,7 +542,7 @@ Re-run the build after each fix. Loop until clean.
 
 ### Step 9: Run the tests
 
-Run: `cd /Users/rjl/Code/github/zotero-connector && cargo test -p zotero-mcp 2>&1 | tail -30`
+Run: `cd /Users/rjl/Code/mcp-zotero && cargo test -p zotero-mcp 2>&1 | tail -30`
 
 Expected: lib tests pass at a count of roughly 105 ± a few. Specifically:
 - `crate::bearer::tests` — 3 tests, all pass.
@@ -559,7 +559,7 @@ Write down the final lib-test count for the commit message.
 Run:
 
 ```bash
-cd /Users/rjl/Code/github/zotero-connector && \
+cd /Users/rjl/Code/mcp-zotero && \
 git diff --stat crates/zotero-mcp/src/main.rs crates/zotero-mcp/src/oauth.rs crates/zotero-mcp/src/oauth/token_store.rs
 ```
 
@@ -567,7 +567,7 @@ Expected: only `oauth/token_store.rs` shows a diff (from Step 5 — moved test a
 
 ### Step 11: Review the Cargo.lock diff
 
-Run: `cd /Users/rjl/Code/github/zotero-connector && git diff Cargo.lock | grep -E "^[-+]name|^[-+]version" | head -40`
+Run: `cd /Users/rjl/Code/mcp-zotero && git diff Cargo.lock | grep -E "^[-+]name|^[-+]version" | head -40`
 
 Expected: minimal churn. `tower`, `http`, `http-body`, `http-body-util`, `bytes`, `tokio-stream`, `uuid`, `rand`, `sse-stream`, `tracing-subscriber` are mostly already in the tree from Slice C. New transitives (if any) belong to the streamable-http subtree — note in the commit body. Anything outside that scope is a surprise.
 
@@ -576,7 +576,7 @@ Expected: minimal churn. `tower`, `http`, `http-body`, `http-body-util`, `bytes`
 Run:
 
 ```bash
-cd /Users/rjl/Code/github/zotero-connector && \
+cd /Users/rjl/Code/mcp-zotero && \
 git add Cargo.toml Cargo.lock \
   crates/zotero-mcp/src/bearer.rs \
   crates/zotero-mcp/src/lib.rs \
@@ -724,7 +724,7 @@ The launchd service restarts with the new env vars but is still running the pre-
 - [ ] **Step 3: Reinstall the new binary**
 
 ```bash
-cd /Users/rjl/Code/github/zotero-connector && cargo install --path crates/zotero-mcp
+cd /Users/rjl/Code/mcp-zotero && cargo install --path crates/zotero-mcp
 ```
 
 - [ ] **Step 4: Kick the service to pick up the new binary**

@@ -50,7 +50,7 @@ The MSRV floors for both crates (reqwest 1.64, toml 1.66) are far below the loca
    - `toml = "1"` (post-1.0 → `major` only; matches the workspace pattern used for `which`, `directories`, `pdf-extract`, `clap`, etc.).
    - Existing reqwest features (`rustls-tls`, `json`, `gzip`, `brotli`) and `default-features = false` are preserved unless a feature was renamed upstream — in which case the renamed name replaces the old, and the change is noted in the commit body.
 
-7. **Workspace-vs-crate placement:** both deps are declared at workspace level (`/Users/rjl/Code/github/zotero-connector/Cargo.toml`, lines 20 and 27). Edits go in the workspace `Cargo.toml`, not in `crates/zotero-mcp/Cargo.toml`.
+7. **Workspace-vs-crate placement:** both deps are declared at workspace level (`/Users/rjl/Code/mcp-zotero/Cargo.toml`, lines 20 and 27). Edits go in the workspace `Cargo.toml`, not in `crates/zotero-mcp/Cargo.toml`.
 
 ---
 

@@ -81,7 +81,7 @@ Counts: 15 × RO, 6 × RO+open, 5 × Mut+idem, 5 × Mut, 2 × open-world mutatin
 
 - [ ] **Step 1: Confirm clean tree on `main`**
 
-Run: `cd /Users/rjl/Code/github/zotero-connector && git status`
+Run: `cd /Users/rjl/Code/mcp-zotero && git status`
 
 Expected: `nothing to commit, working tree clean` and branch `main`.
 
@@ -89,13 +89,13 @@ If dirty, stop and resolve before starting the slice.
 
 - [ ] **Step 2: Capture baseline test results**
 
-Run: `cd /Users/rjl/Code/github/zotero-connector && cargo test -p zotero-mcp 2>&1 | grep "^test result:" | sort | uniq -c`
+Run: `cd /Users/rjl/Code/mcp-zotero && cargo test -p zotero-mcp 2>&1 | grep "^test result:" | sort | uniq -c`
 
 Expected: every line `ok`, no `FAILED`. Lib tests pass at the post-Slice-E baseline. Write the number down — Slice F adds exactly +1 lib test (the new smoke test). The new total gets recorded in the commit body.
 
 - [ ] **Step 3: Record the pre-flight SHA**
 
-Run: `cd /Users/rjl/Code/github/zotero-connector && git rev-parse HEAD`
+Run: `cd /Users/rjl/Code/mcp-zotero && git rev-parse HEAD`
 
 Expected: `3bee636` (the Slice F spec commit) — or, if the slice is re-run after a checkpoint, whatever HEAD is. Write down the SHA. This is the rollback point if the slice escalates.
 
@@ -108,7 +108,7 @@ Expected: `3bee636` (the Slice F spec commit) — or, if the slice is re-run aft
 
 ### Step 1: Read the current server.rs
 
-Read `/Users/rjl/Code/github/zotero-connector/crates/zotero-mcp/src/server.rs`. The 34 tools live between lines 36–278 (current HEAD). Each macro currently has the form:
+Read `/Users/rjl/Code/mcp-zotero/crates/zotero-mcp/src/server.rs`. The 34 tools live between lines 36–278 (current HEAD). Each macro currently has the form:
 
 ```rust
 #[tool(description = "...")]
@@ -408,7 +408,7 @@ Notes on the test:
 
 ### Step 11: Build
 
-Run: `cd /Users/rjl/Code/github/zotero-connector && cargo build -p zotero-mcp 2>&1 | tail -40`
+Run: `cd /Users/rjl/Code/mcp-zotero && cargo build -p zotero-mcp 2>&1 | tail -40`
 
 Expected: clean build. No warnings about unused fields or unknown attribute keys.
 
@@ -425,7 +425,7 @@ Loop build + fix until clean. If a fix requires touching any file other than `cr
 
 ### Step 12: Test
 
-Run: `cd /Users/rjl/Code/github/zotero-connector && cargo test -p zotero-mcp 2>&1 | tail -30`
+Run: `cd /Users/rjl/Code/mcp-zotero && cargo test -p zotero-mcp 2>&1 | tail -30`
 
 Expected:
 - All previously passing tests still pass.
@@ -440,7 +440,7 @@ Failure modes:
 
 ### Step 13: Format (optional)
 
-Run: `cd /Users/rjl/Code/github/zotero-connector && cargo fmt -p zotero-mcp -- --check`
+Run: `cd /Users/rjl/Code/mcp-zotero && cargo fmt -p zotero-mcp -- --check`
 
 If `--check` exits non-zero, run: `cargo fmt -p zotero-mcp` and include the result in the same commit. Acceptable cosmetic outcome: the now-multi-line `#[tool(...)]` macro calls get rewrapped consistently. Required: consistency across the 34 sites.
 
@@ -449,7 +449,7 @@ If `--check` exits non-zero, run: `cargo fmt -p zotero-mcp` and include the resu
 Run:
 
 ```bash
-cd /Users/rjl/Code/github/zotero-connector && \
+cd /Users/rjl/Code/mcp-zotero && \
 git add crates/zotero-mcp/src/server.rs && \
 git status --short
 ```
@@ -555,7 +555,7 @@ Per spec Risks 1 and 4: the slice is mechanical-only. If any of these surface an
 **Revert:**
 
 ```bash
-cd /Users/rjl/Code/github/zotero-connector && \
+cd /Users/rjl/Code/mcp-zotero && \
 git checkout -- crates/zotero-mcp/src/server.rs
 ```
 

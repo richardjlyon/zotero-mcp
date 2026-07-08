@@ -9,7 +9,7 @@
 - **MCP tool annotations** (`read_only_hint` / `destructive_hint` / `idempotent_hint` / `open_world_hint`) are mandatory on new tools — see the existing 34 for examples.
 - **Output shapes** prefer typed `Json<T>` with derived `JsonSchema` over loose `CallToolResult` text. Slice G is migrating the residual.
 - **Releases** are tagged `v0.x.0`. The crate published to crates.io is `zotero-mcp`.
-- **Mirror tax.** The Plan-8 transport stack (`bearer.rs`, `oauth.rs`, `oauth/token_store.rs`, `http_transport.rs`, `setup.rs`) is duplicated into the sister repo `things-mcp` (`/Users/rjl/Code/github/things-mcp-server`) by deliberate choice — no shared library extraction (pinned principle). Any fix to one of those modules MUST be cherry-picked to the sister repo in the same session, or the repos silently drift.
+- **Mirror tax.** The Plan-8 transport stack (`bearer.rs`, `oauth.rs`, `oauth/token_store.rs`, `http_transport.rs`, `setup.rs`) is duplicated into the sister repo `things-mcp` (`/Users/rjl/Code/mcp-things`) by deliberate choice — no shared library extraction (pinned principle). Any fix to one of those modules MUST be cherry-picked to the sister repo in the same session, or the repos silently drift.
 
 ## Layout
 
@@ -37,4 +37,4 @@ Both originated from manual eval passes of the `adding-references` skill against
 
 ## Sister repos
 
-- **`book-ingestion`** (`/Users/rjl/Code/github/book-ingestion`) — Python CLI for book-shaped sources (PDF + EPUB metadata extraction shipped as M2.0 on 2026-05-13). Federated with this repo at the *skill* layer, not the code layer. Cowork project at `claude-cowork/project/book-ingestion/`.
+- **`book-ingestion`** (`/Users/rjl/Code/tool-book-ingestion`) — Python CLI for book-shaped sources (PDF + EPUB metadata extraction shipped as M2.0 on 2026-05-13). Federated with this repo at the *skill* layer, not the code layer. Cowork project at `claude-cowork/project/book-ingestion/`.

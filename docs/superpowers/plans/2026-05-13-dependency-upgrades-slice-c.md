@@ -34,7 +34,7 @@
 
 - [ ] **Step 1: Confirm clean tree on `main`**
 
-Run: `cd /Users/rjl/Code/github/zotero-connector && git status`
+Run: `cd /Users/rjl/Code/mcp-zotero && git status`
 
 Expected: `nothing to commit, working tree clean` and branch `main`.
 
@@ -42,13 +42,13 @@ If dirty, stop and resolve before starting the slice.
 
 - [ ] **Step 2: Capture baseline test results**
 
-Run: `cd /Users/rjl/Code/github/zotero-connector && cargo test -p zotero-mcp 2>&1 | grep "^test result:" | sort | uniq -c`
+Run: `cd /Users/rjl/Code/mcp-zotero && cargo test -p zotero-mcp 2>&1 | grep "^test result:" | sort | uniq -c`
 
 Expected: every line `ok`, no `FAILED`. Lib tests should still be `105 passed; 0 failed` (the Slice B baseline). Write this number down — Slice C's lib-test count may shift up or down by the 3 tests in `tests/schema_shape.rs` if their assertions need to be rewritten under schemars 1.x. The new number gets recorded in the commit body.
 
 - [ ] **Step 3: Record the current pre-flight SHA**
 
-Run: `cd /Users/rjl/Code/github/zotero-connector && git rev-parse HEAD`
+Run: `cd /Users/rjl/Code/mcp-zotero && git rev-parse HEAD`
 
 Expected: `4283852` (the Slice C spec commit) — or, if this slice is being re-run after a checkpoint, whatever the current HEAD is. Write down the SHA. This is the rollback point if the joint bump triggers escalation.
 
@@ -88,7 +88,7 @@ Expected: `4283852` (the Slice C spec commit) — or, if this slice is being re-
 
 ### Step 1: Bump the workspace `Cargo.toml` `rmcp` line
 
-In `/Users/rjl/Code/github/zotero-connector/Cargo.toml`, find line 21:
+In `/Users/rjl/Code/mcp-zotero/Cargo.toml`, find line 21:
 
 ```toml
 rmcp = { version = "0.1", features = ["server", "transport-io"] }
@@ -107,7 +107,7 @@ Three changes in one line:
 
 ### Step 2: Bump the `crates/zotero-mcp/Cargo.toml` `schemars` line
 
-In `/Users/rjl/Code/github/zotero-connector/crates/zotero-mcp/Cargo.toml`, find the `schemars` line (it's in the `[dependencies]` block as `schemars = "0.8"` — `grep -n '^schemars' crates/zotero-mcp/Cargo.toml` finds it).
+In `/Users/rjl/Code/mcp-zotero/crates/zotero-mcp/Cargo.toml`, find the `schemars` line (it's in the `[dependencies]` block as `schemars = "0.8"` — `grep -n '^schemars' crates/zotero-mcp/Cargo.toml` finds it).
 
 Change to: `schemars = "1"`
 
@@ -115,7 +115,7 @@ Change to: `schemars = "1"`
 
 ### Step 3: Joint lockfile update
 
-Run: `cd /Users/rjl/Code/github/zotero-connector && cargo update -p rmcp -p schemars 2>&1 | tail -20`
+Run: `cd /Users/rjl/Code/mcp-zotero && cargo update -p rmcp -p schemars 2>&1 | tail -20`
 
 Expected:
 - `Updating rmcp v0.1.5 -> v1.7.x`
@@ -126,7 +126,7 @@ Expected:
 
 ### Step 4: First build attempt (expected to fail)
 
-Run: `cd /Users/rjl/Code/github/zotero-connector && cargo build -p zotero-mcp 2>&1 | tail -40`
+Run: `cd /Users/rjl/Code/mcp-zotero && cargo build -p zotero-mcp 2>&1 | tail -40`
 
 Expected: FAIL with macro/attribute errors. The first error will almost certainly be in `server.rs` and will name either `tool_box` or `aggr` as an unknown attribute. That's expected — Step 5 fixes it. Do not panic or escalate yet.
 
@@ -134,7 +134,7 @@ If, surprisingly, the build succeeds: skip to Step 10.
 
 ### Step 5: Convert struct-level `#[tool(tool_box)]` → `#[tool_router]`
 
-In `/Users/rjl/Code/github/zotero-connector/crates/zotero-mcp/src/server.rs`, find line 29:
+In `/Users/rjl/Code/mcp-zotero/crates/zotero-mcp/src/server.rs`, find line 29:
 
 ```rust
 #[tool(tool_box)]
@@ -201,7 +201,7 @@ The `args: T` variable name is referenced in the method body — keep it as `arg
 
 ### Step 7: Re-run build, iterate
 
-Run: `cd /Users/rjl/Code/github/zotero-connector && cargo build -p zotero-mcp 2>&1 | tail -40`
+Run: `cd /Users/rjl/Code/mcp-zotero && cargo build -p zotero-mcp 2>&1 | tail -40`
 
 Expected outcomes (in likely order):
 
@@ -222,7 +222,7 @@ For each error: apply the documented fix, re-run `cargo build -p zotero-mcp`. Lo
 If Step 7 completes with the build clean for `server.rs` and tool modules, run:
 
 ```bash
-cd /Users/rjl/Code/github/zotero-connector && \
+cd /Users/rjl/Code/mcp-zotero && \
 git diff --stat crates/zotero-mcp/src/main.rs crates/zotero-mcp/src/http_transport.rs crates/zotero-mcp/src/tools/ crates/zotero-mcp/src/oauth.rs
 ```
 
@@ -230,7 +230,7 @@ Expected: empty, or at most a one-line `use` import update per file. Anything la
 
 ### Step 9: Port `tests/schema_shape.rs` to schemars 1.x
 
-Open `/Users/rjl/Code/github/zotero-connector/crates/zotero-mcp/tests/schema_shape.rs`. Read all 3 test bodies and translate per this pattern.
+Open `/Users/rjl/Code/mcp-zotero/crates/zotero-mcp/tests/schema_shape.rs`. Read all 3 test bodies and translate per this pattern.
 
 **Before (schemars 0.8):**
 ```rust
@@ -257,7 +257,7 @@ The 3 test bodies should end up shorter (Value navigation is more concise than t
 
 ### Step 10: Full build clean
 
-Run: `cd /Users/rjl/Code/github/zotero-connector && cargo build -p zotero-mcp 2>&1 | tail -10`
+Run: `cd /Users/rjl/Code/mcp-zotero && cargo build -p zotero-mcp 2>&1 | tail -10`
 
 Expected: `Finished dev [unoptimized + debuginfo] target(s) in X.XXs`. No errors, no warnings about deprecated symbols beyond the standard cargo build output.
 
@@ -265,7 +265,7 @@ If errors remain that aren't covered by Steps 5–9's fix patterns, this is esca
 
 ### Step 11: Run the full test suite
 
-Run: `cd /Users/rjl/Code/github/zotero-connector && cargo test -p zotero-mcp 2>&1 | tail -30`
+Run: `cd /Users/rjl/Code/mcp-zotero && cargo test -p zotero-mcp 2>&1 | tail -30`
 
 Expected: all binaries pass. Lib tests: a number that is `105` or close to it (the 3 schema_shape tests may have been rewritten with different individual test names or split count). Write the new number down; it goes in the commit body.
 
@@ -273,7 +273,7 @@ If any test fails for reasons other than schema_shape rewrites — escalation.
 
 ### Step 12: Review the lockfile diff
 
-Run: `cd /Users/rjl/Code/github/zotero-connector && git diff Cargo.lock | grep -E "^[-+]name|^[-+]version" | head -40`
+Run: `cd /Users/rjl/Code/mcp-zotero && git diff Cargo.lock | grep -E "^[-+]name|^[-+]version" | head -40`
 
 Expected: `rmcp` 0.1.5 → 1.7.x, `rmcp-macros` matching, `schemars` 0.8.22 → 1.x.x, `schemars_derive` matching. Possible: `paste` → `pastey`, `tokio-stream` patch bump, `serde_spanned`/`toml_datetime`/`winnow` no change (those came in with Slice B's toml bump). Anything outside the rmcp/schemars/macro ecosystem is a surprise — flag it in the commit body.
 
@@ -282,7 +282,7 @@ Expected: `rmcp` 0.1.5 → 1.7.x, `rmcp-macros` matching, `schemars` 0.8.22 → 
 Run:
 
 ```bash
-cd /Users/rjl/Code/github/zotero-connector && \
+cd /Users/rjl/Code/mcp-zotero && \
 git add Cargo.toml crates/zotero-mcp/Cargo.toml Cargo.lock \
   crates/zotero-mcp/src/server.rs \
   crates/zotero-mcp/src/main.rs \
@@ -305,7 +305,7 @@ If `oauth.rs` shows up — that's an escalation trigger per the spec (out-of-bou
 Build the commit body. Replace the `[bracketed]` placeholders with reality from Steps 5–12. Do not leave brackets in the actual commit message.
 
 ```bash
-cd /Users/rjl/Code/github/zotero-connector && \
+cd /Users/rjl/Code/mcp-zotero && \
 git commit -m "$(cat <<'EOF'
 chore(deps): bump rmcp 0.1 → 1.7 (jointly with schemars 0.8 → 1)
 
@@ -360,7 +360,7 @@ Per the spec's Decision 4, the slice cannot be partially landed. If any of these
 Revert:
 
 ```bash
-cd /Users/rjl/Code/github/zotero-connector && \
+cd /Users/rjl/Code/mcp-zotero && \
 git checkout -- Cargo.toml crates/zotero-mcp/Cargo.toml Cargo.lock \
   crates/zotero-mcp/src/server.rs \
   crates/zotero-mcp/src/main.rs \
@@ -395,7 +395,7 @@ Run only after Task 1 lands.
 
 - [ ] **Step 1: Rebuild and install**
 
-Run: `cd /Users/rjl/Code/github/zotero-connector && cargo install --path crates/zotero-mcp 2>&1 | tail -3`
+Run: `cd /Users/rjl/Code/mcp-zotero && cargo install --path crates/zotero-mcp 2>&1 | tail -3`
 
 Expected: `Replacing /Users/rjl/.cargo/bin/zotero-mcp` with the new version.
 

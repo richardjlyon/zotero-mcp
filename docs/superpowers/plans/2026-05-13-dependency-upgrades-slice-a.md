@@ -31,7 +31,7 @@ No source files are touched unless a bump produces a compile error, in which cas
 
 - [ ] **Step 1: Confirm clean tree on `main`**
 
-Run: `cd /Users/rjl/Code/github/zotero-connector && git status`
+Run: `cd /Users/rjl/Code/mcp-zotero && git status`
 
 Expected: `nothing to commit, working tree clean` and branch `main`.
 
@@ -39,13 +39,13 @@ If dirty, stop and resolve before starting the slice.
 
 - [ ] **Step 2: Capture baseline test results**
 
-Run: `cd /Users/rjl/Code/github/zotero-connector && cargo test -p zotero-mcp 2>&1 | grep "^test result:" | sort | uniq -c`
+Run: `cd /Users/rjl/Code/mcp-zotero && cargo test -p zotero-mcp 2>&1 | grep "^test result:" | sort | uniq -c`
 
 Expected: every line shows `ok`, no `FAILED`. Note the total count (e.g. 105 lib tests + various integration tests) so we can spot regressions.
 
 - [ ] **Step 3: Record the current pre-flight SHA**
 
-Run: `cd /Users/rjl/Code/github/zotero-connector && git rev-parse HEAD`
+Run: `cd /Users/rjl/Code/mcp-zotero && git rev-parse HEAD`
 
 Write down the SHA (this is the rollback point if a single bump goes wrong).
 
@@ -78,13 +78,13 @@ rand = "0.10"
 
 - [ ] **Step 2: Update the lockfile**
 
-Run: `cd /Users/rjl/Code/github/zotero-connector && cargo update -p rand`
+Run: `cd /Users/rjl/Code/mcp-zotero && cargo update -p rand`
 
 Expected: `Updating rand v0.9.x -> v0.10.y` (and possibly a small cloud of transitive updates to `rand_*` sibling crates).
 
 - [ ] **Step 3: Build**
 
-Run: `cd /Users/rjl/Code/github/zotero-connector && cargo build -p zotero-mcp 2>&1 | tail -30`
+Run: `cd /Users/rjl/Code/mcp-zotero && cargo build -p zotero-mcp 2>&1 | tail -30`
 
 Expected outcomes:
 - **PASS:** continue to Step 5.
@@ -104,13 +104,13 @@ Re-run Step 3 after each fix attempt. Loop until clean.
 
 - [ ] **Step 5: Run the full test suite**
 
-Run: `cd /Users/rjl/Code/github/zotero-connector && cargo test -p zotero-mcp 2>&1 | tail -20`
+Run: `cd /Users/rjl/Code/mcp-zotero && cargo test -p zotero-mcp 2>&1 | tail -20`
 
 Expected: PASS — same test counts as baseline (Pre-flight Step 2).
 
 - [ ] **Step 6: Review the lockfile diff**
 
-Run: `cd /Users/rjl/Code/github/zotero-connector && git diff Cargo.lock | grep -E "^[-+]name|^[-+]version" | head -20`
+Run: `cd /Users/rjl/Code/mcp-zotero && git diff Cargo.lock | grep -E "^[-+]name|^[-+]version" | head -20`
 
 Confirm the only updated crates are `rand` and its transitive siblings (`rand_chacha`, `rand_core`, etc.). Flag any surprise updates in the commit message.
 
@@ -118,7 +118,7 @@ Confirm the only updated crates are `rand` and its transitive siblings (`rand_ch
 
 Run:
 ```bash
-cd /Users/rjl/Code/github/zotero-connector && \
+cd /Users/rjl/Code/mcp-zotero && \
 git add Cargo.toml Cargo.lock crates/zotero-mcp/Cargo.toml \
   crates/zotero-mcp/src/oauth.rs \
   crates/zotero-mcp/src/oauth/token_store.rs \
@@ -174,13 +174,13 @@ sha2 = "0.11"
 
 - [ ] **Step 2: Update the lockfile**
 
-Run: `cd /Users/rjl/Code/github/zotero-connector && cargo update -p sha2`
+Run: `cd /Users/rjl/Code/mcp-zotero && cargo update -p sha2`
 
 Expected: `Updating sha2 v0.10.x -> v0.11.y` (and possibly `digest`, `block-buffer`, transitive RustCrypto crates).
 
 - [ ] **Step 3: Build**
 
-Run: `cd /Users/rjl/Code/github/zotero-connector && cargo build -p zotero-mcp 2>&1 | tail -30`
+Run: `cd /Users/rjl/Code/mcp-zotero && cargo build -p zotero-mcp 2>&1 | tail -30`
 
 If clean, go to Step 5. If errors, Step 4.
 
@@ -195,20 +195,20 @@ If the fix needs more than 5 minutes or touches semantics, escalate (revert).
 
 - [ ] **Step 5: Run the full test suite**
 
-Run: `cd /Users/rjl/Code/github/zotero-connector && cargo test -p zotero-mcp 2>&1 | tail -20`
+Run: `cd /Users/rjl/Code/mcp-zotero && cargo test -p zotero-mcp 2>&1 | tail -20`
 
 Expected: PASS.
 
 - [ ] **Step 6: Review the lockfile diff**
 
-Run: `cd /Users/rjl/Code/github/zotero-connector && git diff Cargo.lock | grep -E "^[-+]name|^[-+]version" | head -15`
+Run: `cd /Users/rjl/Code/mcp-zotero && git diff Cargo.lock | grep -E "^[-+]name|^[-+]version" | head -15`
 
 Confirm only `sha2` and RustCrypto-family transitives updated.
 
 - [ ] **Step 7: Commit**
 
 ```bash
-cd /Users/rjl/Code/github/zotero-connector && \
+cd /Users/rjl/Code/mcp-zotero && \
 git add Cargo.toml Cargo.lock crates/zotero-mcp/Cargo.toml \
   crates/zotero-mcp/src/oauth.rs \
   crates/zotero-mcp/src/oauth/token_store.rs 2>/dev/null; \
@@ -252,11 +252,11 @@ md-5 = "0.11"
 
 - [ ] **Step 2: Update the lockfile**
 
-Run: `cd /Users/rjl/Code/github/zotero-connector && cargo update -p md-5`
+Run: `cd /Users/rjl/Code/mcp-zotero && cargo update -p md-5`
 
 - [ ] **Step 3: Build**
 
-Run: `cd /Users/rjl/Code/github/zotero-connector && cargo build -p zotero-mcp 2>&1 | tail -30`
+Run: `cd /Users/rjl/Code/mcp-zotero && cargo build -p zotero-mcp 2>&1 | tail -30`
 
 If clean, go to Step 5. If errors, Step 4.
 
@@ -272,7 +272,7 @@ If clean, go to Step 5. If errors, Step 4.
 - [ ] **Step 5: Run the writer-attach test specifically, then the full suite**
 
 ```bash
-cd /Users/rjl/Code/github/zotero-connector && \
+cd /Users/rjl/Code/mcp-zotero && \
 cargo test -p zotero-mcp --test writer_attach_file 2>&1 | tail -10 && \
 cargo test -p zotero-mcp 2>&1 | tail -10
 ```
@@ -281,12 +281,12 @@ Expected: both PASS. The targeted test runs the upload path that uses the MD5 di
 
 - [ ] **Step 6: Review the lockfile diff**
 
-Run: `cd /Users/rjl/Code/github/zotero-connector && git diff Cargo.lock | grep -E "^[-+]name|^[-+]version" | head -15`
+Run: `cd /Users/rjl/Code/mcp-zotero && git diff Cargo.lock | grep -E "^[-+]name|^[-+]version" | head -15`
 
 - [ ] **Step 7: Commit**
 
 ```bash
-cd /Users/rjl/Code/github/zotero-connector && \
+cd /Users/rjl/Code/mcp-zotero && \
 git add Cargo.toml Cargo.lock crates/zotero-mcp/Cargo.toml \
   crates/zotero-mcp/src/core/writer/attachments.rs 2>/dev/null; \
 git commit -m "$(cat <<'EOF'
@@ -332,7 +332,7 @@ If neither path exists, the user hasn't run OAuth yet and there's nothing to bre
 
 - [ ] **Step 2: Bump the version in workspace `Cargo.toml`**
 
-In `/Users/rjl/Code/github/zotero-connector/Cargo.toml`, find:
+In `/Users/rjl/Code/mcp-zotero/Cargo.toml`, find:
 ```toml
 directories = "5"
 ```
@@ -343,13 +343,13 @@ directories = "6"
 
 - [ ] **Step 3: Update the lockfile**
 
-Run: `cd /Users/rjl/Code/github/zotero-connector && cargo update -p directories`
+Run: `cd /Users/rjl/Code/mcp-zotero && cargo update -p directories`
 
 Expected: `Updating directories v5.0.x -> v6.0.y` (and possibly `directories-next`, `dirs-sys` transitive updates).
 
 - [ ] **Step 4: Build**
 
-Run: `cd /Users/rjl/Code/github/zotero-connector && cargo build -p zotero-mcp 2>&1 | tail -30`
+Run: `cd /Users/rjl/Code/mcp-zotero && cargo build -p zotero-mcp 2>&1 | tail -30`
 
 If errors, Step 5. If clean, Step 6.
 
@@ -404,18 +404,18 @@ rm -rf /tmp/probe_dirs
 
 - [ ] **Step 7: Run the full test suite**
 
-Run: `cd /Users/rjl/Code/github/zotero-connector && cargo test -p zotero-mcp 2>&1 | tail -20`
+Run: `cd /Users/rjl/Code/mcp-zotero && cargo test -p zotero-mcp 2>&1 | tail -20`
 
 Expected: PASS.
 
 - [ ] **Step 8: Review the lockfile diff**
 
-Run: `cd /Users/rjl/Code/github/zotero-connector && git diff Cargo.lock | grep -E "^[-+]name|^[-+]version" | head -20`
+Run: `cd /Users/rjl/Code/mcp-zotero && git diff Cargo.lock | grep -E "^[-+]name|^[-+]version" | head -20`
 
 - [ ] **Step 9: Commit**
 
 ```bash
-cd /Users/rjl/Code/github/zotero-connector && \
+cd /Users/rjl/Code/mcp-zotero && \
 git add Cargo.toml Cargo.lock \
   crates/zotero-mcp/src/oauth.rs \
   crates/zotero-mcp/src/setup.rs 2>/dev/null; \
@@ -447,7 +447,7 @@ EOF
 
 - [ ] **Step 1: Check the new MSRV**
 
-Run: `cd /Users/rjl/Code/github/zotero-connector && cargo info which@8.0.2 2>&1 | grep -i "rust-version"`
+Run: `cd /Users/rjl/Code/mcp-zotero && cargo info which@8.0.2 2>&1 | grep -i "rust-version"`
 
 If the output shows an MSRV ≥ 1.85, that's the new floor. Confirm the project's toolchain meets it:
 
@@ -470,11 +470,11 @@ which = "8"
 
 - [ ] **Step 3: Update the lockfile**
 
-Run: `cd /Users/rjl/Code/github/zotero-connector && cargo update -p which`
+Run: `cd /Users/rjl/Code/mcp-zotero && cargo update -p which`
 
 - [ ] **Step 4: Build**
 
-Run: `cd /Users/rjl/Code/github/zotero-connector && cargo build -p zotero-mcp 2>&1 | tail -30`
+Run: `cd /Users/rjl/Code/mcp-zotero && cargo build -p zotero-mcp 2>&1 | tail -30`
 
 If errors, Step 5. If clean, Step 6.
 
@@ -487,18 +487,18 @@ If errors, Step 5. If clean, Step 6.
 
 - [ ] **Step 6: Run the full test suite**
 
-Run: `cd /Users/rjl/Code/github/zotero-connector && cargo test -p zotero-mcp 2>&1 | tail -20`
+Run: `cd /Users/rjl/Code/mcp-zotero && cargo test -p zotero-mcp 2>&1 | tail -20`
 
 Expected: PASS.
 
 - [ ] **Step 7: Review the lockfile diff**
 
-Run: `cd /Users/rjl/Code/github/zotero-connector && git diff Cargo.lock | grep -E "^[-+]name|^[-+]version" | head -10`
+Run: `cd /Users/rjl/Code/mcp-zotero && git diff Cargo.lock | grep -E "^[-+]name|^[-+]version" | head -10`
 
 - [ ] **Step 8: Commit**
 
 ```bash
-cd /Users/rjl/Code/github/zotero-connector && \
+cd /Users/rjl/Code/mcp-zotero && \
 git add Cargo.toml Cargo.lock crates/zotero-mcp/Cargo.toml \
   crates/zotero-mcp/src/core/pdf.rs 2>/dev/null; \
 git commit -m "$(cat <<'EOF'
@@ -531,7 +531,7 @@ Three minor versions of churn. Highest-risk crate in the slice.
 
 - [ ] **Step 1: Bump the version in workspace `Cargo.toml`**
 
-In `/Users/rjl/Code/github/zotero-connector/Cargo.toml`, find:
+In `/Users/rjl/Code/mcp-zotero/Cargo.toml`, find:
 ```toml
 pdf-extract = "0.7"
 ```
@@ -542,13 +542,13 @@ pdf-extract = "0.10"
 
 - [ ] **Step 2: Update the lockfile**
 
-Run: `cd /Users/rjl/Code/github/zotero-connector && cargo update -p pdf-extract`
+Run: `cd /Users/rjl/Code/mcp-zotero && cargo update -p pdf-extract`
 
 Expected: `Updating pdf-extract v0.7.x -> v0.10.y` plus transitive updates (notably `lopdf`).
 
 - [ ] **Step 3: Build**
 
-Run: `cd /Users/rjl/Code/github/zotero-connector && cargo build -p zotero-mcp 2>&1 | tail -30`
+Run: `cd /Users/rjl/Code/mcp-zotero && cargo build -p zotero-mcp 2>&1 | tail -30`
 
 If errors, Step 4. If clean, Step 5.
 
@@ -568,7 +568,7 @@ If errors, Step 4. If clean, Step 5.
 - [ ] **Step 5: Run the PDF tests specifically, then the full suite**
 
 ```bash
-cd /Users/rjl/Code/github/zotero-connector && \
+cd /Users/rjl/Code/mcp-zotero && \
 cargo test -p zotero-mcp --test pdf_text 2>&1 | tail -10 && \
 cargo test -p zotero-mcp 2>&1 | tail -10
 ```
@@ -580,7 +580,7 @@ Expected: both PASS.
 The fixture at `crates/zotero-mcp/tests/fixtures/hello.pdf` is a real PDF that the existing `pdf_text` tests use. Run a one-line probe to confirm pdf-extract 0.10 still returns non-empty text:
 
 ```bash
-cd /Users/rjl/Code/github/zotero-connector && \
+cd /Users/rjl/Code/mcp-zotero && \
 cargo test -p zotero-mcp --test pdf_text -- --nocapture 2>&1 | grep -i "extracted\|hello\|text" | head -5
 ```
 
@@ -588,14 +588,14 @@ Expected: the tests log non-empty extraction. Exact byte-for-byte output may dif
 
 - [ ] **Step 7: Review the lockfile diff**
 
-Run: `cd /Users/rjl/Code/github/zotero-connector && git diff Cargo.lock | grep -E "^[-+]name|^[-+]version" | head -25`
+Run: `cd /Users/rjl/Code/mcp-zotero && git diff Cargo.lock | grep -E "^[-+]name|^[-+]version" | head -25`
 
 Expect `pdf-extract` plus its transitive churn (`lopdf`, `adobe-cmap-parser`, etc.). Flag anything unexpected in the commit message.
 
 - [ ] **Step 8: Commit**
 
 ```bash
-cd /Users/rjl/Code/github/zotero-connector && \
+cd /Users/rjl/Code/mcp-zotero && \
 git add Cargo.toml Cargo.lock crates/zotero-mcp/src/core/pdf.rs 2>/dev/null; \
 git commit -m "$(cat <<'EOF'
 chore(deps): bump pdf-extract 0.7 → 0.10
@@ -619,7 +619,7 @@ After all six tasks (or however many didn't escalate):
 
 - [ ] **Step 1: Rebuild and install**
 
-Run: `cd /Users/rjl/Code/github/zotero-connector && cargo install --path crates/zotero-mcp 2>&1 | tail -3`
+Run: `cd /Users/rjl/Code/mcp-zotero && cargo install --path crates/zotero-mcp 2>&1 | tail -3`
 
 Expected: `Replacing /Users/rjl/.cargo/bin/zotero-mcp` with the new version.
 

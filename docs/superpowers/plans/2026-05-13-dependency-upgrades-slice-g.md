@@ -71,19 +71,19 @@ The implementer references this when migrating each `_t` function and its `serve
 
 - [ ] **Step 1: Confirm clean tree on `main`**
 
-Run: `cd /Users/rjl/Code/github/zotero-connector && git status`
+Run: `cd /Users/rjl/Code/mcp-zotero && git status`
 
 Expected: `nothing to commit, working tree clean` and branch `main`.
 
 - [ ] **Step 2: Capture baseline test results**
 
-Run: `cd /Users/rjl/Code/github/zotero-connector && cargo test -p zotero-mcp 2>&1 | grep "^test result:" | sort | uniq -c`
+Run: `cd /Users/rjl/Code/mcp-zotero && cargo test -p zotero-mcp 2>&1 | grep "^test result:" | sort | uniq -c`
 
 Expected: every line `ok`, no `FAILED`. Lib tests pass at 107 (the Slice F baseline). Write the number down. Slice G's lib-test count adds +1 (the new `output_schemas_emitted_for_json_returning_tools` smoke test). Final expected: 108.
 
 - [ ] **Step 3: Record the pre-flight SHA**
 
-Run: `cd /Users/rjl/Code/github/zotero-connector && git rev-parse HEAD`
+Run: `cd /Users/rjl/Code/mcp-zotero && git rev-parse HEAD`
 
 Expected: `58a1b25` (the Slice G spec commit). Write down the SHA. Rollback point if the slice escalates.
 
@@ -101,7 +101,7 @@ The 18 types compile standalone after this task — no other files depend on the
 
 ### Step 1.1: `core/types.rs` — add 12 derives
 
-Open `/Users/rjl/Code/github/zotero-connector/crates/zotero-mcp/src/core/types.rs`. At line 1, the file imports `serde::{Deserialize, Serialize}`. Add `schemars::JsonSchema` import:
+Open `/Users/rjl/Code/mcp-zotero/crates/zotero-mcp/src/core/types.rs`. At line 1, the file imports `serde::{Deserialize, Serialize}`. Add `schemars::JsonSchema` import:
 
 ```rust
 use schemars::JsonSchema;
@@ -128,13 +128,13 @@ Then, for each of the 12 affected types, extend the existing `#[derive(...)]` li
 
 ### Step 1.2: `core/pdf.rs` — add 2 derives
 
-Open `/Users/rjl/Code/github/zotero-connector/crates/zotero-mcp/src/core/pdf.rs`. Add `use schemars::JsonSchema;` at the top alongside existing serde imports.
+Open `/Users/rjl/Code/mcp-zotero/crates/zotero-mcp/src/core/pdf.rs`. Add `use schemars::JsonSchema;` at the top alongside existing serde imports.
 
 For `PdfTextSource` (line 12) and `PdfTextResult` (line 20): extend `#[derive(...)]` to include `JsonSchema`.
 
 ### Step 1.3: `core/web.rs` — add 3 derives
 
-Open `/Users/rjl/Code/github/zotero-connector/crates/zotero-mcp/src/core/web.rs`. Add `use schemars::JsonSchema;`.
+Open `/Users/rjl/Code/mcp-zotero/crates/zotero-mcp/src/core/web.rs`. Add `use schemars::JsonSchema;`.
 
 Three types need `JsonSchema` added to their existing derive line:
 - `WebMode` (around line 13 — `pub enum WebMode { Snapshot, Live, Auto }`) — see note below
@@ -148,7 +148,7 @@ Verify which types are actually in the output graph by reading `WebContentResult
 
 ### Step 1.4: `core/enrichment/mod.rs` — add 1 derive
 
-Open `/Users/rjl/Code/github/zotero-connector/crates/zotero-mcp/src/core/enrichment/mod.rs`. Add `use schemars::JsonSchema;`.
+Open `/Users/rjl/Code/mcp-zotero/crates/zotero-mcp/src/core/enrichment/mod.rs`. Add `use schemars::JsonSchema;`.
 
 For `NormalizedRecord` (line ~19): extend `#[derive(Debug, Clone, Serialize, Deserialize)]` to `#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]`.
 
@@ -158,7 +158,7 @@ For `NormalizedRecord` (line ~19): extend `#[derive(Debug, Clone, Serialize, Des
 
 ### Step 1.5: Build and verify
 
-Run: `cd /Users/rjl/Code/github/zotero-connector && cargo build -p zotero-mcp 2>&1 | tail -30`
+Run: `cd /Users/rjl/Code/mcp-zotero && cargo build -p zotero-mcp 2>&1 | tail -30`
 
 Expected: clean build.
 
@@ -181,7 +181,7 @@ Likely failure modes and fixes:
 
 ### Step 2.1: Read the current function and its callers
 
-Open `/Users/rjl/Code/github/zotero-connector/crates/zotero-mcp/src/core/enrichment/propose.rs`. Find `find_weak_metadata_items` at line 34. Current signature:
+Open `/Users/rjl/Code/mcp-zotero/crates/zotero-mcp/src/core/enrichment/propose.rs`. Find `find_weak_metadata_items` at line 34. Current signature:
 
 ```rust
 pub async fn find_weak_metadata_items(
@@ -194,7 +194,7 @@ pub async fn find_weak_metadata_items(
 Run a grep to identify callers:
 
 ```bash
-cd /Users/rjl/Code/github/zotero-connector && \
+cd /Users/rjl/Code/mcp-zotero && \
   grep -rn "find_weak_metadata_items" crates/zotero-mcp/src/ crates/zotero-mcp/tests/
 ```
 
@@ -242,7 +242,7 @@ If `propose.rs` has unit tests that exercise this function, update their asserti
 
 ### Step 2.5: Build and verify
 
-Run: `cd /Users/rjl/Code/github/zotero-connector && cargo build -p zotero-mcp 2>&1 | tail -20`
+Run: `cd /Users/rjl/Code/mcp-zotero && cargo build -p zotero-mcp 2>&1 | tail -20`
 
 Expected: clean build. If `tools/enrichment.rs::find_weak_metadata_items_t` fails to compile because it destructures the tuple, that's fine — that file gets migrated in Task 5. For now, if a caller other than `find_weak_metadata_items_t` is broken, fix it (don't touch `find_weak_metadata_items_t` yet).
 
@@ -257,7 +257,7 @@ The cleanest sequence: at this stage `find_weak_metadata_items_t` may still comp
 
 ### Step 3.1: Add the two output structs
 
-Open `/Users/rjl/Code/github/zotero-connector/crates/zotero-mcp/src/tools/attachments.rs`. Add the two new structs at a reasonable location (e.g., near the existing `CreateItemArgs` struct around line 131):
+Open `/Users/rjl/Code/mcp-zotero/crates/zotero-mcp/src/tools/attachments.rs`. Add the two new structs at a reasonable location (e.g., near the existing `CreateItemArgs` struct around line 131):
 
 ```rust
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -276,7 +276,7 @@ The existing `use schemars::JsonSchema;` import at the top of the file (already 
 
 ### Step 3.2: Build and verify
 
-Run: `cd /Users/rjl/Code/github/zotero-connector && cargo build -p zotero-mcp 2>&1 | tail -20`
+Run: `cd /Users/rjl/Code/mcp-zotero && cargo build -p zotero-mcp 2>&1 | tail -20`
 
 Expected: clean. The two new structs are unused at this point — Rust may emit "struct never used" warnings; ignore them, they'll go away after Task 4/5.
 
@@ -292,7 +292,7 @@ Expected: clean. The two new structs are unused at this point — Rust may emit 
 
 ### Step 4.1: Update imports in `tools/search.rs`
 
-Open `/Users/rjl/Code/github/zotero-connector/crates/zotero-mcp/src/tools/search.rs`. Current rmcp import (line 3):
+Open `/Users/rjl/Code/mcp-zotero/crates/zotero-mcp/src/tools/search.rs`. Current rmcp import (line 3):
 
 ```rust
 use rmcp::model::{CallToolResult, Content};
@@ -358,7 +358,7 @@ pub async fn search_items(s: &AppState, a: SearchArgs) -> Result<Json<Vec<Search
 
 ### Step 4.3: Migrate the 5 matching wrappers in `server.rs`
 
-Open `/Users/rjl/Code/github/zotero-connector/crates/zotero-mcp/src/server.rs`. Add `Json` to the rmcp import block:
+Open `/Users/rjl/Code/mcp-zotero/crates/zotero-mcp/src/server.rs`. Add `Json` to the rmcp import block:
 
 ```rust
 // Before (current import block at line 12)
@@ -432,7 +432,7 @@ The body is unchanged. Only the return-type annotation changes. The 5 mappings:
 
 ### Step 4.4: Build and verify
 
-Run: `cd /Users/rjl/Code/github/zotero-connector && cargo build -p zotero-mcp 2>&1 | tail -30`
+Run: `cd /Users/rjl/Code/mcp-zotero && cargo build -p zotero-mcp 2>&1 | tail -30`
 
 Expected: clean. The 5 search-related tools now return `Json<T>`; everything else still compiles.
 
@@ -573,7 +573,7 @@ Bodies are unchanged.
 
 ### Step 5.4: Build and verify
 
-Run: `cd /Users/rjl/Code/github/zotero-connector && cargo build -p zotero-mcp 2>&1 | tail -30`
+Run: `cd /Users/rjl/Code/mcp-zotero && cargo build -p zotero-mcp 2>&1 | tail -30`
 
 Expected: clean. If `create_item_t`'s `version as i64` cast is wrong (type mismatch), the error tells you the actual return type; adjust the cast or remove it.
 
@@ -686,7 +686,7 @@ Bodies unchanged.
 
 ### Step 6.4: Build and verify
 
-Run: `cd /Users/rjl/Code/github/zotero-connector && cargo build -p zotero-mcp 2>&1 | tail -30`
+Run: `cd /Users/rjl/Code/mcp-zotero && cargo build -p zotero-mcp 2>&1 | tail -30`
 
 Expected: clean build, no errors, no warnings about unused imports.
 
@@ -723,7 +723,7 @@ The block now has two test functions (`tool_annotations_present_on_representativ
 
 ### Step 7.2: Run the full test suite
 
-Run: `cd /Users/rjl/Code/github/zotero-connector && cargo test -p zotero-mcp 2>&1 | tail -30`
+Run: `cd /Users/rjl/Code/mcp-zotero && cargo test -p zotero-mcp 2>&1 | tail -30`
 
 Expected:
 - All existing tests pass.
@@ -741,7 +741,7 @@ Write down the final lib-test count for the commit body.
 
 ### Step 7.3: Format
 
-Run: `cd /Users/rjl/Code/github/zotero-connector && cargo fmt -p zotero-mcp -- --check`
+Run: `cd /Users/rjl/Code/mcp-zotero && cargo fmt -p zotero-mcp -- --check`
 
 If `--check` exits non-zero, run: `cargo fmt -p zotero-mcp` and include the result in the same commit. Multi-line return types may get rewrapped.
 
@@ -750,7 +750,7 @@ If `--check` exits non-zero, run: `cargo fmt -p zotero-mcp` and include the resu
 Run:
 
 ```bash
-cd /Users/rjl/Code/github/zotero-connector && \
+cd /Users/rjl/Code/mcp-zotero && \
 git add \
   crates/zotero-mcp/src/core/types.rs \
   crates/zotero-mcp/src/core/pdf.rs \
@@ -895,7 +895,7 @@ The slice can be partially landed across tasks BUT not partially committed (sing
 **Revert:**
 
 ```bash
-cd /Users/rjl/Code/github/zotero-connector && \
+cd /Users/rjl/Code/mcp-zotero && \
 git checkout -- \
   crates/zotero-mcp/src/core/types.rs \
   crates/zotero-mcp/src/core/pdf.rs \

@@ -23,7 +23,7 @@ The final OAuth implementation commit is `a7376d3`. HEAD may be newer if doc com
 
 - [ ] **Action:**
   ```bash
-  cd /Users/rjl/Code/github/zotero-connector
+  cd /Users/rjl/Code/mcp-zotero
   git log --oneline a7376d3..HEAD
   ```
 - [ ] **Expected:** either no output (you're exactly on `a7376d3`), or a list containing only `docs(…)` commits like the testing-plan commit (`docs(test): add comprehensive manual verification plan`).
@@ -622,7 +622,7 @@ If at any point during this verification the system is in a broken state that yo
 
 - [ ] **Action:**
   ```bash
-  cd /Users/rjl/Code/github/zotero-connector
+  cd /Users/rjl/Code/mcp-zotero
   git log --oneline 9b6cbf7..HEAD
   # Note the SHAs of the 16 OAuth commits.
   ```
