@@ -52,13 +52,23 @@ pub async fn get_pdf_path(s: &AppState, a: ItemKeyArgs) -> Result<CallToolResult
     )]))
 }
 
-pub async fn get_pdf_text_t(s: &AppState, a: ItemKeyArgs) -> Result<Json<PdfTextResult>, Error> {
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct PdfTextArgs {
+    pub item_key: String,
+    /// Force the old flat-text extraction path (format `plain`, no page
+    /// anchors), skipping the layout-aware Docling route.
+    #[serde(default)]
+    pub plain: bool,
+}
+
+pub async fn get_pdf_text_t(s: &AppState, a: PdfTextArgs) -> Result<Json<PdfTextResult>, Error> {
     let r = get_pdf_text(
         &s.pool,
         &a.item_key,
         1,
         &s.cfg.storage_dir(),
         &s.pdf_engines,
+        a.plain,
     )
     .await
     .map_err(map_err)?;
@@ -70,6 +80,10 @@ pub struct FirstPagesArgs {
     pub item_key: String,
     #[serde(default = "two")]
     pub n: usize,
+    /// Force the old flat-text extraction path (format `plain`, no page
+    /// anchors), skipping the layout-aware Docling route.
+    #[serde(default)]
+    pub plain: bool,
 }
 fn two() -> usize {
     2
@@ -86,6 +100,7 @@ pub async fn get_pdf_first_pages_t(
         &s.cfg.storage_dir(),
         a.n,
         &s.pdf_engines,
+        a.plain,
     )
     .await
     .map_err(map_err)?;

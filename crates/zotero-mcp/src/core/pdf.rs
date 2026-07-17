@@ -15,6 +15,212 @@ pub enum PdfTextSource {
     LiveExtract,
     /// Recovered via Poppler's `pdftotext` after `pdf-extract` failed.
     PdftotextFallback,
+    /// Layout-aware markdown via the Docling service.
+    Docling,
+    /// OCR pre-step (`ocrmypdf`) followed by Docling extraction.
+    OcrThenDocling,
+}
+
+/// Output format of an extraction result. Markdown is produced by the
+/// layout-aware (Docling) route; the flat-text chain produces plain text.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PdfFormat {
+    Markdown,
+    Plain,
+}
+
+/// Placeholder Docling emits (post-assembly) where a formula region was
+/// detected but not decoded to LaTeX.
+pub const FORMULA_NOT_DECODED_MARKER: &str = "<!-- formula-not-decoded -->";
+/// Placeholder Docling emits where a figure/chart image was detected but
+/// not transcribed.
+pub const IMAGE_MARKER: &str = "<!-- image -->";
+/// Pages whose non-marker character count falls below this floor are
+/// flagged as possible content drops (`low_text_pages`).
+pub const LOW_TEXT_CHAR_FLOOR: usize = 100;
+/// Sentinel passed to Docling as `md_page_break_placeholder`; replaced
+/// with `--- p.N ---` anchors during assembly.
+pub const DOCLING_PAGE_BREAK_SENTINEL: &str = "<!-- docling-page-break -->";
+
+/// Minimum non-whitespace characters (markers and page anchors excluded)
+/// an extraction must yield to count as having extracted anything. Any
+/// route whose output falls below this floor is treated as "did not
+/// extract" and the orchestrator continues to the next route; if every
+/// route is sub-floor the result is a loud `PdfNothingExtractable` error
+/// naming the OCR remedy — never empty text as success.
+///
+/// 10 is deliberately tiny: the shortest real content (a title line)
+/// clears it easily, while the junk that empty routes emit (a stray page
+/// number, form feeds, whitespace) stays under it. A false "sub-floor"
+/// only costs trying the next route; a false "extracted" would violate
+/// the presence-is-trustworthy invariant, so the bar stays low but
+/// non-trivial. It is the same judgement ("no usable text") the OCR
+/// probe applies, so both share this constant.
+pub const MIN_EXTRACTED_CHARS: usize = 10;
+
+/// True when `text` clears [`MIN_EXTRACTED_CHARS`], not counting
+/// whitespace, `--- p.N ---` page anchors, or the Docling
+/// formula/image placeholders.
+fn meets_text_floor(text: &str) -> bool {
+    let stripped = text
+        .replace(FORMULA_NOT_DECODED_MARKER, " ")
+        .replace(IMAGE_MARKER, " ");
+    let n: usize = stripped
+        .lines()
+        .filter(|l| parse_page_anchor(l).is_none())
+        .map(|l| l.chars().filter(|c| !c.is_whitespace()).count())
+        .sum();
+    n >= MIN_EXTRACTED_CHARS
+}
+
+/// Machine-readable completeness report attached to every extraction
+/// result. Downstream may trust *presence* in the text; absence on a page
+/// listed in a drop vector must be treated as "unknown", never as "not in
+/// the document".
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct Completeness {
+    /// True only when a layout route ran with formula enrichment and left
+    /// zero undecoded formulas and zero untranscribed images.
+    pub complete: bool,
+    /// The engine that produced the text this report describes.
+    pub engine: PdfTextSource,
+    /// Number of pages seen in the page-anchored output (0 when the engine
+    /// cannot report pages, i.e. the flat-text chain).
+    pub pages: u32,
+    /// Character count per page (markers excluded), in page order.
+    pub per_page_chars: Vec<usize>,
+    /// One entry per undecoded-formula marker: the page it appears on.
+    pub undecoded_formulas: Vec<u32>,
+    /// One entry per untranscribed image/chart marker: the page it appears on.
+    pub untranscribed_images: Vec<u32>,
+    /// Pages recovered by the OCR pre-step.
+    pub ocr_pages: Vec<u32>,
+    /// Pages under `LOW_TEXT_CHAR_FLOOR` characters — possible drops.
+    pub low_text_pages: Vec<u32>,
+    /// Human-readable caveats (e.g. the flat-text warning).
+    pub notes: Vec<String>,
+}
+
+impl Completeness {
+    /// Report for the flat-text engines (`.zotero-ft-cache`, `pdf-extract`,
+    /// `pdftotext`). They cannot detect structure, so they are never
+    /// complete and their absence must never read as authoritative.
+    pub fn flat_text(engine: PdfTextSource) -> Self {
+        Self {
+            complete: false,
+            engine,
+            pages: 0,
+            per_page_chars: Vec::new(),
+            undecoded_formulas: Vec::new(),
+            untranscribed_images: Vec::new(),
+            ocr_pages: Vec::new(),
+            low_text_pages: Vec::new(),
+            notes: vec!["flat-text engine cannot detect tables/formulas/images".into()],
+        }
+    }
+
+    /// Derive the report from page-anchored markdown (`--- p.N ---` lines,
+    /// as assembled from the Docling page-break sentinel). Pure — no I/O.
+    ///
+    /// Markdown without any anchors is treated as a single page.
+    /// `complete` is true only when `engine` is a layout route
+    /// (`Docling` / `OcrThenDocling`), `formula_enrichment` was on, and no
+    /// undecoded-formula or untranscribed-image markers remain.
+    pub fn from_page_anchored_markdown(
+        markdown: &str,
+        engine: PdfTextSource,
+        formula_enrichment: bool,
+        ocr_pages: Vec<u32>,
+    ) -> Self {
+        // Split into (page_number, content) in anchor order.
+        let mut pages: Vec<(u32, String)> = Vec::new();
+        for line in markdown.lines() {
+            if let Some(n) = parse_page_anchor(line) {
+                pages.push((n, String::new()));
+            } else if let Some((_, content)) = pages.last_mut() {
+                content.push_str(line);
+                content.push('\n');
+            }
+        }
+        if pages.is_empty() {
+            pages.push((1, markdown.to_owned()));
+        }
+
+        let mut per_page_chars = Vec::with_capacity(pages.len());
+        let mut undecoded_formulas = Vec::new();
+        let mut untranscribed_images = Vec::new();
+        let mut low_text_pages = Vec::new();
+
+        for (page, content) in &pages {
+            for _ in 0..content.matches(FORMULA_NOT_DECODED_MARKER).count() {
+                undecoded_formulas.push(*page);
+            }
+            for _ in 0..content.matches(IMAGE_MARKER).count() {
+                untranscribed_images.push(*page);
+            }
+            let stripped = content
+                .replace(FORMULA_NOT_DECODED_MARKER, "")
+                .replace(IMAGE_MARKER, "");
+            let chars = stripped.trim().chars().count();
+            if chars < LOW_TEXT_CHAR_FLOOR {
+                low_text_pages.push(*page);
+            }
+            per_page_chars.push(chars);
+        }
+
+        let layout_route = matches!(
+            engine,
+            PdfTextSource::Docling | PdfTextSource::OcrThenDocling
+        );
+        let mut notes = Vec::new();
+        if !layout_route {
+            notes.push("flat-text engine cannot detect tables/formulas/images".into());
+        }
+        if !formula_enrichment {
+            notes.push("formula enrichment was not enabled; formulas may be undecoded".into());
+        }
+
+        let complete = layout_route
+            && formula_enrichment
+            && undecoded_formulas.is_empty()
+            && untranscribed_images.is_empty();
+
+        Self {
+            complete,
+            engine,
+            pages: pages.len() as u32,
+            per_page_chars,
+            undecoded_formulas,
+            untranscribed_images,
+            ocr_pages,
+            low_text_pages,
+            notes,
+        }
+    }
+}
+
+/// Parse a `--- p.N ---` page-anchor line; returns `N` on match.
+fn parse_page_anchor(line: &str) -> Option<u32> {
+    let rest = line.trim().strip_prefix("--- p.")?;
+    let num = rest.strip_suffix(" ---")?;
+    num.parse().ok()
+}
+
+/// Replace the Docling page-break sentinel with `--- p.N ---` anchors,
+/// numbering pages from 1. The first page's anchor is prepended, so the
+/// output always starts with `--- p.1 ---`. Pure — no I/O.
+fn assemble_page_anchors(markdown: &str, sentinel: &str) -> String {
+    let mut out = String::with_capacity(markdown.len() + 64);
+    for (i, page) in markdown.split(sentinel).enumerate() {
+        if i > 0 {
+            out.push_str("\n\n");
+        }
+        out.push_str(&format!("--- p.{} ---\n\n", i + 1));
+        out.push_str(page.trim());
+    }
+    out.push('\n');
+    out
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -22,6 +228,9 @@ pub struct PdfTextResult {
     pub text: String,
     pub source: PdfTextSource,
     pub character_count: usize,
+    pub format: PdfFormat,
+    pub page_anchors: bool,
+    pub completeness: Completeness,
 }
 
 /// A PDF text extraction engine. Implementors are stateless and reusable.
@@ -90,6 +299,13 @@ impl PdfEngine for PdfExtractEngine {
 /// field is `Arc`).
 #[derive(Clone)]
 pub struct PdfEngines {
+    /// Layout-aware primary route; `None` when no Docling endpoint is
+    /// configured (neither `DOCLING_URL` nor `docling_url` in config).
+    docling: Option<Arc<DoclingEngine>>,
+    /// `ocrmypdf` binary for the OCR pre-step on image-only (scanned)
+    /// PDFs; `None` degrades gracefully (OCR skipped, gap recorded in the
+    /// completeness report).
+    ocrmypdf: Option<PathBuf>,
     primary: Arc<dyn PdfEngine>,
     fallback: FallbackState,
 }
@@ -106,6 +322,14 @@ pub enum FallbackState {
 }
 
 impl PdfEngines {
+    pub fn docling(&self) -> Option<&Arc<DoclingEngine>> {
+        self.docling.as_ref()
+    }
+
+    pub fn ocrmypdf(&self) -> Option<&PathBuf> {
+        self.ocrmypdf.as_ref()
+    }
+
     pub fn primary(&self) -> &Arc<dyn PdfEngine> {
         &self.primary
     }
@@ -114,7 +338,28 @@ impl PdfEngines {
         &self.fallback
     }
 
-    /// Build the engine bundle from configuration. Resolves `pdftotext`:
+    /// Replace the Docling route on an already-built bundle. Lets
+    /// integration tests point the orchestrator at a specific endpoint
+    /// (e.g. a dead port to exercise the flat-text fallback) regardless
+    /// of `DOCLING_URL` / config; `None` disables the route.
+    pub fn with_docling(mut self, docling: Option<Arc<DoclingEngine>>) -> Self {
+        self.docling = docling;
+        self
+    }
+
+    /// Build the engine bundle from configuration.
+    ///
+    /// Resolves the Docling endpoint (the layout-aware primary route):
+    ///
+    /// 1. The `DOCLING_URL` environment variable, when set and non-empty.
+    /// 2. `cfg.docling_url` from config.
+    /// 3. Otherwise, the Docling route is disabled.
+    ///
+    /// Resolves `ocrmypdf` (the OCR pre-step for scanned PDFs) the same
+    /// way as `pdftotext` below: config override first, then PATH lookup;
+    /// unresolvable means the pre-step is skipped gracefully.
+    ///
+    /// Resolves `pdftotext`:
     ///
     /// 1. `cfg.pdftotext_path` if set and the file exists.
     /// 2. `which::which("pdftotext")` on PATH.
@@ -123,6 +368,32 @@ impl PdfEngines {
     /// Honors `cfg.pdftotext_fallback`: when false, the fallback is
     /// `Disabled` regardless of discovery.
     pub fn build(cfg: &crate::core::config::ZoteroConfig) -> Self {
+        let docling_url = std::env::var("DOCLING_URL")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| cfg.docling_url.clone());
+        let docling = docling_url.map(|url| {
+            tracing::info!(url = %url, "docling layout-aware extraction route enabled");
+            Arc::new(DoclingEngine::new(
+                url,
+                Duration::from_secs(cfg.docling_convert_timeout_secs),
+                Duration::from_secs(cfg.docling_health_timeout_secs),
+            ))
+        });
+
+        let ocrmypdf = resolve_ocrmypdf(cfg.ocrmypdf_path.as_deref());
+        match &ocrmypdf {
+            Some(bin) => {
+                tracing::info!(path = %bin.display(), "ocrmypdf OCR pre-step enabled");
+            }
+            None => {
+                tracing::info!(
+                    "ocrmypdf not on PATH; scanned (image-only) PDFs will not be OCR'd. \
+                     Install ocrmypdf for the OCR pre-step."
+                );
+            }
+        }
+
         let primary: Arc<dyn PdfEngine> = Arc::new(PdfExtractEngine);
 
         let fallback = if !cfg.pdftotext_fallback {
@@ -145,8 +416,27 @@ impl PdfEngines {
             }
         };
 
-        Self { primary, fallback }
+        Self {
+            docling,
+            ocrmypdf,
+            primary,
+            fallback,
+        }
     }
+}
+
+fn resolve_ocrmypdf(override_path: Option<&str>) -> Option<PathBuf> {
+    if let Some(p) = override_path {
+        let pb = PathBuf::from(p);
+        if pb.exists() {
+            return Some(pb);
+        }
+        tracing::warn!(
+            path = p,
+            "configured ocrmypdf_path does not exist; falling back to PATH lookup"
+        );
+    }
+    which::which("ocrmypdf").ok()
 }
 
 fn resolve_pdftotext(override_path: Option<&str>) -> Option<PathBuf> {
@@ -279,19 +569,323 @@ impl PdfEngine for PdftotextEngine {
     }
 }
 
+/// Layout-aware PDF-to-markdown extraction via a `docling-serve` instance.
+///
+/// The primary route: real tables, reading order, `--- p.N ---` page
+/// anchors (assembled from the page-break sentinel), and formula
+/// enrichment so equations decode to LaTeX instead of dropping. Not part
+/// of the flat-text `PdfEngine` chain — the orchestrator health-checks it
+/// and falls through to that chain on any failure.
+pub struct DoclingEngine {
+    base_url: String,
+    client: reqwest::Client,
+    convert_timeout: Duration,
+    health_timeout: Duration,
+}
+
+/// A successful Docling conversion: page-anchored markdown plus whether
+/// formula enrichment was applied (it is retried without enrichment when
+/// the service cannot run the enrichment model).
+pub struct DoclingExtraction {
+    pub markdown: String,
+    pub formula_enrichment: bool,
+}
+
+/// Shape of the docling-serve `/v1/convert/file` response (the fields we
+/// consume).
+#[derive(Deserialize)]
+struct DoclingConvertResponse {
+    #[serde(default)]
+    document: Option<DoclingDocument>,
+    #[serde(default)]
+    status: String,
+    #[serde(default)]
+    errors: Vec<serde_json::Value>,
+}
+
+#[derive(Deserialize)]
+struct DoclingDocument {
+    #[serde(default)]
+    md_content: Option<String>,
+}
+
+impl DoclingEngine {
+    pub fn new(base_url: String, convert_timeout: Duration, health_timeout: Duration) -> Self {
+        Self {
+            base_url: base_url.trim_end_matches('/').to_string(),
+            client: reqwest::Client::new(),
+            convert_timeout,
+            health_timeout,
+        }
+    }
+
+    /// Short probe of `GET {base_url}/health`. False on any error or
+    /// non-2xx status; the orchestrator then skips the Docling route.
+    pub async fn healthy(&self) -> bool {
+        let url = format!("{}/health", self.base_url);
+        match self
+            .client
+            .get(&url)
+            .timeout(self.health_timeout)
+            .send()
+            .await
+        {
+            Ok(resp) => resp.status().is_success(),
+            Err(e) => {
+                tracing::warn!(url = %url, error = %e, "docling health check failed");
+                false
+            }
+        }
+    }
+
+    /// Convert the PDF at `path` to page-anchored markdown
+    /// (`--- p.N ---` anchors).
+    ///
+    /// Tries with formula enrichment first (equations decode to LaTeX).
+    /// Some docling-serve deployments cannot run the enrichment model —
+    /// the convert then fails outright — so on failure the convert is
+    /// retried once without enrichment and the returned
+    /// `formula_enrichment: false` makes the completeness report declare
+    /// the gap (`complete: false` + enrichment note) rather than lose the
+    /// document entirely.
+    pub async fn extract_markdown(
+        &self,
+        path: &Path,
+    ) -> std::result::Result<DoclingExtraction, EngineError> {
+        let bytes = tokio::fs::read(path).await.map_err(|e| {
+            EngineError::Failed(format!("docling: failed to read {}: {}", path.display(), e))
+        })?;
+        let file_name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "document.pdf".into());
+
+        match self.convert(&bytes, &file_name, true).await {
+            Ok(markdown) => Ok(DoclingExtraction {
+                markdown,
+                formula_enrichment: true,
+            }),
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    path = %path.display(),
+                    "docling convert with formula enrichment failed; retrying without enrichment"
+                );
+                let markdown = self.convert(&bytes, &file_name, false).await?;
+                Ok(DoclingExtraction {
+                    markdown,
+                    formula_enrichment: false,
+                })
+            }
+        }
+    }
+
+    /// One `POST /v1/convert/file` round-trip. Treats a non-2xx response,
+    /// `status != "success"`, non-empty `errors`, or empty markdown as
+    /// failure.
+    async fn convert(
+        &self,
+        bytes: &[u8],
+        file_name: &str,
+        formula_enrichment: bool,
+    ) -> std::result::Result<String, EngineError> {
+        let part = reqwest::multipart::Part::bytes(bytes.to_vec())
+            .file_name(file_name.to_string())
+            .mime_str("application/pdf")
+            .map_err(|e| EngineError::Failed(format!("docling: invalid mime type: {}", e)))?;
+        let form = reqwest::multipart::Form::new()
+            .text("to_formats", "md")
+            .text(
+                "do_formula_enrichment",
+                if formula_enrichment { "true" } else { "false" },
+            )
+            .text("md_page_break_placeholder", DOCLING_PAGE_BREAK_SENTINEL)
+            .part("files", part);
+
+        let timeout_secs = self.convert_timeout.as_secs();
+        let resp = self
+            .client
+            .post(format!("{}/v1/convert/file", self.base_url))
+            .multipart(form)
+            .timeout(self.convert_timeout)
+            .send()
+            .await
+            .map_err(|e| {
+                if e.is_timeout() {
+                    EngineError::Timeout(timeout_secs)
+                } else {
+                    EngineError::Failed(format!("docling convert request failed: {}", e))
+                }
+            })?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            let snippet: String = body.chars().take(300).collect();
+            return Err(EngineError::Failed(format!(
+                "docling convert returned HTTP {}: {}",
+                status, snippet
+            )));
+        }
+
+        let body: DoclingConvertResponse = resp.json().await.map_err(|e| {
+            EngineError::Failed(format!("docling convert response not JSON: {}", e))
+        })?;
+
+        if body.status != "success" {
+            return Err(EngineError::Failed(format!(
+                "docling convert status was {:?}",
+                body.status
+            )));
+        }
+        if !body.errors.is_empty() {
+            return Err(EngineError::Failed(format!(
+                "docling convert reported errors: {:?}",
+                body.errors
+            )));
+        }
+        let md = body
+            .document
+            .and_then(|d| d.md_content)
+            .ok_or_else(|| EngineError::Failed("docling convert returned no md_content".into()))?;
+        if md.trim().is_empty() {
+            return Err(EngineError::Failed(
+                "docling convert returned empty markdown".into(),
+            ));
+        }
+
+        Ok(assemble_page_anchors(&md, DOCLING_PAGE_BREAK_SENTINEL))
+    }
+}
+
+/// Character floor for the text-layer probe: a PDF whose in-process
+/// extraction yields fewer trimmed characters than this is treated as
+/// having no usable text layer (i.e. a scan) and offered to the OCR
+/// pre-step. Deliberately low — `ocrmypdf --skip-text` leaves any real
+/// text alone, so a false "no text layer" only costs an OCR pass. Shares
+/// the single minimum-text floor with the orchestrator.
+pub const OCR_PROBE_MIN_CHARS: usize = MIN_EXTRACTED_CHARS;
+
+/// Wall-clock ceiling for one `ocrmypdf` run.
+const OCRMYPDF_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Outcome of the cheap in-process text-layer probe.
+enum TextLayer {
+    /// Enough text read — a normal text PDF.
+    Present,
+    /// Near-nothing read — a scan.
+    Absent,
+    /// `pdf-extract` errored. Ambiguous: text-bearing PDFs defeat it, but
+    /// so do scans it chokes on.
+    Unknown,
+}
+
+/// Cheap text-layer probe. Distinguishes a definite scan (`Absent`) from a
+/// probe that simply failed (`Unknown`) so the two OCR call sites can weigh
+/// the ambiguous case differently: the pre-step stays conservative (only a
+/// definite scan pre-empts Docling), while the last-ditch rescue is
+/// aggressive (an ambiguous probe still earns an OCR attempt once every
+/// other route has already produced nothing).
+async fn probe_text_layer(pdf_path: &Path) -> TextLayer {
+    match PdfExtractEngine.extract(pdf_path).await {
+        Ok(text) if text.trim().chars().count() >= OCR_PROBE_MIN_CHARS => TextLayer::Present,
+        Ok(_) => TextLayer::Absent,
+        Err(_) => TextLayer::Unknown,
+    }
+}
+
+/// A temp file removed on drop. Holds the OCR'd copy so the original PDF
+/// is never mutated.
+struct TempPdf(PathBuf);
+
+impl TempPdf {
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for TempPdf {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// Run `ocrmypdf --skip-text` on `pdf_path` into a fresh temp file and
+/// return a guard that deletes it on drop. The input is only ever read;
+/// the OCR text layer exists solely in the temp copy.
+async fn run_ocrmypdf(binary: &Path, pdf_path: &Path) -> std::result::Result<TempPdf, EngineError> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let out = std::env::temp_dir().join(format!(
+        "zotero-mcp-ocr-{}-{}.pdf",
+        std::process::id(),
+        nanos
+    ));
+    let guard = TempPdf(out.clone());
+
+    // --output-type pdf skips the Ghostscript PDF/A conversion; the copy
+    // is transient input for Docling, not an archival artifact.
+    let run = tokio::process::Command::new(binary)
+        .arg("--skip-text")
+        .arg("--output-type")
+        .arg("pdf")
+        .arg("--")
+        .arg(pdf_path)
+        .arg(&out)
+        .stdin(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .output();
+
+    let output = match tokio::time::timeout(OCRMYPDF_TIMEOUT, run).await {
+        Ok(Ok(o)) => o,
+        Ok(Err(e)) => {
+            return Err(EngineError::Failed(format!(
+                "failed to run ocrmypdf: {}",
+                e
+            )));
+        }
+        Err(_) => return Err(EngineError::Timeout(OCRMYPDF_TIMEOUT.as_secs())),
+    };
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let trimmed = stderr.trim();
+        // Keep the tail: ocrmypdf prints progress first, the error last.
+        let tail: String = {
+            let rev: Vec<char> = trimmed.chars().rev().take(400).collect();
+            rev.into_iter().rev().collect()
+        };
+        return Err(EngineError::Failed(format!(
+            "ocrmypdf exited {}: {}",
+            output.status, tail
+        )));
+    }
+    if !out.exists() {
+        return Err(EngineError::Failed(
+            "ocrmypdf reported success but produced no output file".into(),
+        ));
+    }
+
+    Ok(guard)
+}
+
 pub async fn get_pdf_text(
     pool: &ReadOnlyPool,
     parent_key: &str,
     library_id: i64,
     storage_dir: &Path,
     engines: &PdfEngines,
+    plain: bool,
 ) -> Result<PdfTextResult> {
     let pdf_path = resolve_path(pool, parent_key, library_id, storage_dir).await?;
     let storage_item_dir = pdf_path
         .parent()
         .ok_or_else(|| Error::AttachmentNotFound(parent_key.into()))?
         .to_path_buf();
-    extract(&pdf_path, &storage_item_dir, engines).await
+    extract(&pdf_path, &storage_item_dir, engines, plain).await
 }
 
 pub async fn get_pdf_first_pages(
@@ -301,109 +895,470 @@ pub async fn get_pdf_first_pages(
     storage_dir: &Path,
     n_pages: usize,
     engines: &PdfEngines,
+    plain: bool,
 ) -> Result<PdfTextResult> {
-    let full = get_pdf_text(pool, parent_key, library_id, storage_dir, engines).await?;
-    let cap = (n_pages * 3500).min(full.text.len());
-    let mut text: String = full.text.chars().take(cap).collect();
-    if text.len() < full.text.len() {
-        text.push_str("\n[... truncated ...]");
-    }
-    Ok(PdfTextResult {
-        text,
-        source: full.source,
-        character_count: cap,
-    })
+    let full = get_pdf_text(pool, parent_key, library_id, storage_dir, engines, plain).await?;
+    Ok(truncate_to_first_pages(full, n_pages))
 }
 
-/// Core orchestrator: cache check → primary engine → fallback engine.
-async fn extract(
+/// Character cap per requested page for output without page anchors,
+/// where true page boundaries are unknown to the engine.
+const PLAIN_CHARS_PER_PAGE: usize = 3500;
+
+/// Truncate a full extraction to its first `n_pages` pages.
+///
+/// Page-anchored output is cut on page boundaries: the first `n_pages`
+/// `--- p.N ---` sections are kept whole (tables and anchors are never
+/// sliced mid-way) and the completeness report is adjusted to describe
+/// only the retained pages — `pages`, `per_page_chars`, and the drop
+/// vectors are filtered to the retained page numbers, with a note
+/// declaring the truncation. Un-anchored (plain) output falls back to a
+/// character cap, also declared in the notes. Pure — no I/O; public so
+/// integration tests can drive it on a real extraction result.
+pub fn truncate_to_first_pages(full: PdfTextResult, n_pages: usize) -> PdfTextResult {
+    if full.page_anchors {
+        let mut retained_pages: Vec<u32> = Vec::new();
+        let mut kept_lines: Vec<&str> = Vec::new();
+        let mut total_pages = 0usize;
+        let mut keeping = true;
+        for line in full.text.lines() {
+            if let Some(n) = parse_page_anchor(line) {
+                total_pages += 1;
+                if total_pages > n_pages {
+                    keeping = false;
+                } else {
+                    retained_pages.push(n);
+                }
+            }
+            if keeping {
+                kept_lines.push(line);
+            }
+        }
+        if total_pages <= n_pages {
+            return full;
+        }
+
+        let kept = kept_lines.join("\n");
+        let text = format!(
+            "{}\n\n[... truncated: first {} of {} pages ...]\n",
+            kept.trim_end(),
+            retained_pages.len(),
+            total_pages
+        );
+
+        let retained: std::collections::HashSet<u32> = retained_pages.iter().copied().collect();
+        let mut completeness = full.completeness;
+        completeness.pages = retained_pages.len() as u32;
+        completeness.per_page_chars.truncate(retained_pages.len());
+        completeness
+            .undecoded_formulas
+            .retain(|p| retained.contains(p));
+        completeness
+            .untranscribed_images
+            .retain(|p| retained.contains(p));
+        completeness.ocr_pages.retain(|p| retained.contains(p));
+        completeness.low_text_pages.retain(|p| retained.contains(p));
+        completeness.notes.push(format!(
+            "output truncated to the first {} of {} pages; this report describes \
+             only the retained pages",
+            retained_pages.len(),
+            total_pages
+        ));
+
+        let n = text.chars().count();
+        PdfTextResult {
+            text,
+            source: full.source,
+            character_count: n,
+            format: full.format,
+            page_anchors: true,
+            completeness,
+        }
+    } else {
+        let cap = n_pages * PLAIN_CHARS_PER_PAGE;
+        if full.text.chars().count() <= cap {
+            return full;
+        }
+        let mut text: String = full.text.chars().take(cap).collect();
+        text.push_str("\n[... truncated ...]");
+        let mut completeness = full.completeness;
+        completeness.notes.push(format!(
+            "output truncated to the first {} characters; page boundaries are \
+             unknown without page anchors",
+            cap
+        ));
+        let n = text.chars().count();
+        PdfTextResult {
+            text,
+            source: full.source,
+            character_count: n,
+            format: full.format,
+            page_anchors: false,
+            completeness,
+        }
+    }
+}
+
+/// Core orchestrator: Docling (layout-aware primary route, with an OCR
+/// pre-step for scanned PDFs) → cache check → primary engine → fallback
+/// engine. Public so integration tests (and callers already holding a
+/// resolved PDF path) can drive the full route stack directly.
+///
+/// `plain: true` forces the old flat-text path (format `Plain`, no page
+/// anchors): the Docling route is skipped entirely and the chain runs
+/// cache → pdf-extract → pdftotext, still failing loudly when nothing
+/// extracts.
+pub async fn extract(
     pdf_path: &Path,
     storage_item_dir: &Path,
     engines: &PdfEngines,
+    plain: bool,
 ) -> Result<PdfTextResult> {
-    // 1. Cache hit.
+    // 0. Layout-aware primary route (Docling), when configured. Tried
+    //    ahead of the whole flat-text chain — including the Zotero cache,
+    //    which is itself a flat extraction — for arbiter quality. Any
+    //    health/convert failure falls through to that chain, whose
+    //    results report `complete: false`. Skipped when the caller asked
+    //    for `plain` output.
+    if let Some(docling) = engines.docling().filter(|_| !plain) {
+        if docling.healthy().await {
+            // OCR pre-step (not a route): when the PDF has no usable text
+            // layer, run `ocrmypdf --skip-text` into a temp copy and send
+            // *that* to Docling. The original file is never touched.
+            // Missing or failing ocrmypdf degrades gracefully: the
+            // original goes to Docling as-is and the gap is recorded in
+            // the completeness notes.
+            let mut ocr_temp: Option<TempPdf> = None;
+            let mut ocr_note: Option<String> = None;
+            // Conservative here: only a *definite* scan pre-empts Docling
+            // with OCR. An ambiguous (`Unknown`) probe goes straight to
+            // Docling, which does its own OCR anyway.
+            if matches!(probe_text_layer(pdf_path).await, TextLayer::Absent) {
+                match engines.ocrmypdf() {
+                    Some(bin) => match run_ocrmypdf(bin, pdf_path).await {
+                        Ok(temp) => {
+                            tracing::info!(
+                                path = %pdf_path.display(),
+                                "no usable text layer; applied ocrmypdf OCR pre-step"
+                            );
+                            ocr_temp = Some(temp);
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e,
+                                path = %pdf_path.display(),
+                                "ocrmypdf failed; continuing without the OCR pre-step"
+                            );
+                            ocr_note = Some(format!(
+                                "no usable text layer detected but the OCR pre-step failed \
+                                 ({}); scanned content may be missing",
+                                e
+                            ));
+                        }
+                    },
+                    None => {
+                        tracing::warn!(
+                            path = %pdf_path.display(),
+                            "no usable text layer and ocrmypdf is not available; skipping OCR"
+                        );
+                        ocr_note = Some(
+                            "no usable text layer detected and ocrmypdf is not available; \
+                             scanned content may be missing (install ocrmypdf for the OCR \
+                             pre-step)"
+                                .into(),
+                        );
+                    }
+                }
+            }
+            let (convert_path, source) = match &ocr_temp {
+                Some(temp) => (temp.path(), PdfTextSource::OcrThenDocling),
+                None => (pdf_path, PdfTextSource::Docling),
+            };
+
+            match docling.extract_markdown(convert_path).await {
+                Ok(extraction) if !meets_text_floor(&extraction.markdown) => {
+                    tracing::warn!(
+                        path = %pdf_path.display(),
+                        "docling markdown below the minimum text floor; \
+                         falling back to flat-text chain"
+                    );
+                }
+                Ok(extraction) => {
+                    let mut completeness = Completeness::from_page_anchored_markdown(
+                        &extraction.markdown,
+                        source,
+                        extraction.formula_enrichment,
+                        Vec::new(),
+                    );
+                    if ocr_temp.is_some() {
+                        // The pre-step ran because the whole document
+                        // lacked a text layer, so every page in the result
+                        // was recovered by OCR.
+                        completeness.ocr_pages = (1..=completeness.pages).collect();
+                    }
+                    if let Some(note) = ocr_note {
+                        // A scan we could not OCR: never claim completeness.
+                        completeness.complete = false;
+                        completeness.notes.push(note);
+                    }
+                    let n = extraction.markdown.chars().count();
+                    return Ok(PdfTextResult {
+                        text: extraction.markdown,
+                        source,
+                        character_count: n,
+                        format: PdfFormat::Markdown,
+                        page_anchors: true,
+                        completeness,
+                    });
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        path = %pdf_path.display(),
+                        "docling convert failed; falling back to flat-text chain"
+                    );
+                }
+            }
+        } else {
+            tracing::warn!(
+                path = %pdf_path.display(),
+                "docling health check failed; falling back to flat-text chain"
+            );
+        }
+    }
+
+    // 1. Cache hit — only when the cached text clears the minimum floor.
+    //    An empty/near-empty cache (e.g. Zotero's own failed extraction)
+    //    must never be returned as success.
     let cache = storage_item_dir.join(".zotero-ft-cache");
     if cache.exists() {
         let text = tokio::fs::read_to_string(&cache).await?;
-        let n = text.chars().count();
-        return Ok(PdfTextResult {
-            text,
-            source: PdfTextSource::ZoteroCache,
-            character_count: n,
-        });
-    }
-
-    // 2. Primary engine.
-    let primary_err = match engines.primary().extract(pdf_path).await {
-        Ok(text) => {
+        if meets_text_floor(&text) {
             let n = text.chars().count();
             return Ok(PdfTextResult {
                 text,
-                source: PdfTextSource::LiveExtract,
+                source: PdfTextSource::ZoteroCache,
                 character_count: n,
+                format: PdfFormat::Plain,
+                page_anchors: false,
+                completeness: Completeness::flat_text(PdfTextSource::ZoteroCache),
             });
         }
-        Err(e) => e.to_string(),
+        tracing::warn!(
+            path = %cache.display(),
+            "ignoring .zotero-ft-cache below the minimum text floor"
+        );
+    }
+
+    // 2+3. Flat-text chain (pdf-extract → pdftotext) on the original file.
+    let chain = flat_chain(pdf_path, engines).await;
+    if let FlatChainOutcome::Extracted { text, source } = chain {
+        if source == PdfTextSource::PdftotextFallback {
+            // Cache write (best-effort).
+            if let Err(e) = write_cache_atomic(&cache, &text).await {
+                tracing::warn!(
+                    path = %cache.display(),
+                    error = %e,
+                    "failed to write .zotero-ft-cache after pdftotext fallback"
+                );
+            } else {
+                tracing::info!(
+                    path = %cache.display(),
+                    "wrote .zotero-ft-cache after pdftotext fallback"
+                );
+            }
+        }
+        let n = text.chars().count();
+        return Ok(PdfTextResult {
+            text,
+            source,
+            character_count: n,
+            format: PdfFormat::Plain,
+            page_anchors: false,
+            completeness: Completeness::flat_text(source),
+        });
+    }
+    let FlatChainOutcome::Nothing {
+        error,
+        sub_floor_success,
+    } = chain
+    else {
+        unreachable!("Extracted handled above");
     };
 
-    // 3. Fallback engine.
+    // 4. OCR rescue: nothing extracted above the floor. When the PDF has
+    //    no usable text layer (a scan) and ocrmypdf is available, OCR to a
+    //    temp copy — the original is never touched — and run the flat-text
+    //    chain over that copy. This honours the nothing-extractable
+    //    invariant even when the Docling route is unreachable. Aggressive
+    //    here: an ambiguous (`Unknown`) probe still earns an OCR attempt
+    //    now that every other route has produced nothing. Skipped for
+    //    `plain` callers, who asked for the flat path that never OCRs.
+    let layer = if plain {
+        TextLayer::Present // plain callers never OCR; treat as "has text layer".
+    } else {
+        probe_text_layer(pdf_path).await
+    };
+    if !matches!(layer, TextLayer::Present) {
+        if let Some(bin) = engines.ocrmypdf() {
+            match run_ocrmypdf(bin, pdf_path).await {
+                Ok(temp) => {
+                    if let FlatChainOutcome::Extracted { text, source } =
+                        flat_chain(temp.path(), engines).await
+                    {
+                        tracing::info!(
+                            path = %pdf_path.display(),
+                            "OCR rescue recovered text via the flat-text chain"
+                        );
+                        let n = text.chars().count();
+                        let mut completeness = Completeness::flat_text(source);
+                        completeness.notes.push(
+                            "text recovered by an ocrmypdf OCR pre-step (the Docling \
+                             route was unavailable); a flat-text engine read the OCR'd \
+                             copy, so page-level OCR attribution is unavailable"
+                                .into(),
+                        );
+                        return Ok(PdfTextResult {
+                            text,
+                            source,
+                            character_count: n,
+                            format: PdfFormat::Plain,
+                            page_anchors: false,
+                            completeness,
+                        });
+                    }
+                    tracing::warn!(
+                        path = %pdf_path.display(),
+                        "OCR rescue also produced no usable text"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        path = %pdf_path.display(),
+                        "ocrmypdf failed during the OCR rescue"
+                    );
+                }
+            }
+        }
+        // A *definite* scan nothing could read: loud error naming the
+        // remedy — never empty text as success. An ambiguous (`Unknown`)
+        // probe falls through to the concrete flat-chain error below,
+        // which is more informative than a generic scan message.
+        if matches!(layer, TextLayer::Absent) {
+            return Err(Error::PdfNothingExtractable {
+                path: pdf_path.display().to_string(),
+                detail: match engines.ocrmypdf() {
+                    Some(_) => "no usable text layer and the OCR pre-step could not recover text",
+                    None => "no usable text layer and ocrmypdf is not available",
+                }
+                .into(),
+            });
+        }
+    }
+
+    // The PDF has (or may have) a text layer, yet no route extracted
+    // above the floor. Sub-floor "successes" must still surface as the
+    // loud nothing-extractable error; hard engine failures keep their
+    // original error shapes.
+    if sub_floor_success {
+        return Err(Error::PdfNothingExtractable {
+            path: pdf_path.display().to_string(),
+            detail: "every route returned empty or near-empty text".into(),
+        });
+    }
+    Err(error)
+}
+
+/// Outcome of one pass of the flat-text chain over a single file.
+enum FlatChainOutcome {
+    /// Above-floor text from an engine.
+    Extracted { text: String, source: PdfTextSource },
+    /// No above-floor text. `error` is what the orchestrator surfaces
+    /// when no OCR rescue applies; `sub_floor_success` is true when an
+    /// engine returned sub-floor text *as success* (the
+    /// nothing-extractable shape, as opposed to hard engine failures).
+    Nothing {
+        error: Error,
+        sub_floor_success: bool,
+    },
+}
+
+/// Run the flat-text chain (primary `pdf-extract`, then the `pdftotext`
+/// fallback) over `path`, applying the minimum-text floor to every
+/// engine "success" so sub-floor output is treated as "did not extract".
+async fn flat_chain(path: &Path, engines: &PdfEngines) -> FlatChainOutcome {
+    let (primary_err, primary_sub_floor) = match engines.primary().extract(path).await {
+        Ok(text) if meets_text_floor(&text) => {
+            return FlatChainOutcome::Extracted {
+                text,
+                source: PdfTextSource::LiveExtract,
+            };
+        }
+        Ok(_) => (
+            "pdf-extract produced no usable text (below the minimum floor)".to_string(),
+            true,
+        ),
+        Err(e) => (e.to_string(), false),
+    };
+
     let fallback = match engines.fallback() {
         FallbackState::Ready(eng) => eng,
         FallbackState::Disabled => {
-            return Err(Error::Pdf(primary_err));
+            return FlatChainOutcome::Nothing {
+                error: Error::Pdf(primary_err),
+                sub_floor_success: primary_sub_floor,
+            };
         }
         FallbackState::BinaryMissing => {
             tracing::warn!(
                 error = %primary_err,
-                path = %pdf_path.display(),
+                path = %path.display(),
                 "pdf-extract failed and pdftotext fallback is unavailable"
             );
-            return Err(Error::PdftotextMissing);
+            return FlatChainOutcome::Nothing {
+                error: Error::PdftotextMissing,
+                sub_floor_success: primary_sub_floor,
+            };
         }
     };
 
     tracing::warn!(
         error = %primary_err,
-        path = %pdf_path.display(),
-        "pdf-extract failed; trying pdftotext fallback"
+        path = %path.display(),
+        "pdf-extract produced nothing usable; trying pdftotext fallback"
     );
 
-    let text = match fallback.extract(pdf_path).await {
-        Ok(t) => t,
-        Err(EngineError::Timeout(secs)) => {
-            return Err(Error::PdftotextTimeout(
-                secs,
-                pdf_path.display().to_string(),
-            ));
-        }
-        Err(EngineError::Failed(msg)) => {
-            return Err(Error::PdfAllEnginesFailed {
+    match fallback.extract(path).await {
+        Ok(text) if meets_text_floor(&text) => FlatChainOutcome::Extracted {
+            text,
+            source: PdfTextSource::PdftotextFallback,
+        },
+        Ok(_) => FlatChainOutcome::Nothing {
+            error: Error::PdfNothingExtractable {
+                path: path.display().to_string(),
+                detail: format!(
+                    "{}; pdftotext produced no usable text (below the minimum floor)",
+                    primary_err
+                ),
+            },
+            sub_floor_success: true,
+        },
+        // A real timeout / hard failure is a distinct, often transient
+        // condition — surface it verbatim rather than letting a sub-floor
+        // primary mask it as the "install ocrmypdf" scan error.
+        Err(EngineError::Timeout(secs)) => FlatChainOutcome::Nothing {
+            error: Error::PdftotextTimeout(secs, path.display().to_string()),
+            sub_floor_success: false,
+        },
+        Err(EngineError::Failed(msg)) => FlatChainOutcome::Nothing {
+            error: Error::PdfAllEnginesFailed {
                 pdf_extract: primary_err,
                 pdftotext: msg,
-            });
-        }
-    };
-
-    // 4. Cache write (best-effort).
-    if let Err(e) = write_cache_atomic(&cache, &text).await {
-        tracing::warn!(
-            path = %cache.display(),
-            error = %e,
-            "failed to write .zotero-ft-cache after pdftotext fallback"
-        );
-    } else {
-        tracing::info!(
-            path = %cache.display(),
-            "wrote .zotero-ft-cache after pdftotext fallback"
-        );
+            },
+            sub_floor_success: false,
+        },
     }
-
-    let n = text.chars().count();
-    Ok(PdfTextResult {
-        text,
-        source: PdfTextSource::PdftotextFallback,
-        character_count: n,
-    })
 }
 
 /// Write the cache via tmp-file + rename so a kill mid-write doesn't leave
@@ -432,6 +1387,324 @@ async fn write_cache_atomic(cache: &Path, text: &str) -> std::io::Result<()> {
 
 pub fn cache_path_for(storage_dir: &Path, parent_key: &str) -> PathBuf {
     storage_dir.join(parent_key).join(".zotero-ft-cache")
+}
+
+#[cfg(test)]
+mod completeness_tests {
+    use super::*;
+
+    /// Page-anchored markdown with markers spread across pages:
+    /// p.1 prose only, p.2 two undecoded formulas, p.3 a lone image,
+    /// p.4 prose only.
+    fn marked_markdown() -> String {
+        format!(
+            "--- p.1 ---\n\n\
+             # A Title\n\n\
+             This first page carries enough prose to sit comfortably above the \
+             low-text character floor used by the completeness derivation.\n\n\
+             --- p.2 ---\n\n\
+             An equation follows, introduced by enough surrounding prose that \
+             this page clears the low-text character floor on its own.\n\n\
+             {formula}\n\n\
+             Prose between the two formula regions on this page.\n\n\
+             {formula}\n\n\
+             --- p.3 ---\n\n\
+             {image}\n\n\
+             --- p.4 ---\n\n\
+             The final page also carries enough prose to sit comfortably above \
+             the low-text character floor used by the derivation.\n",
+            formula = FORMULA_NOT_DECODED_MARKER,
+            image = IMAGE_MARKER,
+        )
+    }
+
+    #[test]
+    fn derives_per_page_counts_and_locations_from_markers() {
+        let c = Completeness::from_page_anchored_markdown(
+            &marked_markdown(),
+            PdfTextSource::Docling,
+            true,
+            Vec::new(),
+        );
+
+        assert_eq!(c.pages, 4);
+        assert_eq!(c.per_page_chars.len(), 4);
+        // One entry per marker occurrence: page 2 twice, page 3 once.
+        assert_eq!(c.undecoded_formulas, vec![2, 2]);
+        assert_eq!(c.untranscribed_images, vec![3]);
+        // Page 3 is nothing but an image marker: low text after markers are
+        // stripped; the prose pages are above the floor.
+        assert_eq!(c.low_text_pages, vec![3]);
+        assert!(c.per_page_chars[0] >= LOW_TEXT_CHAR_FLOOR);
+        assert!(c.per_page_chars[2] < LOW_TEXT_CHAR_FLOOR);
+        assert!(c.per_page_chars[3] >= LOW_TEXT_CHAR_FLOOR);
+        // Unresolved drops => not complete.
+        assert!(!c.complete);
+        assert_eq!(c.engine, PdfTextSource::Docling);
+        assert!(c.ocr_pages.is_empty());
+    }
+
+    #[test]
+    fn clean_layout_extraction_is_complete() {
+        let md = "--- p.1 ---\n\n\
+                  Plenty of prose on the first page, well above the low-text \
+                  floor, with no formula or image placeholders anywhere.\n\n\
+                  --- p.2 ---\n\n\
+                  A second page of equally unremarkable but sufficiently long \
+                  prose so that nothing here reads as a possible drop.\n";
+        let c =
+            Completeness::from_page_anchored_markdown(md, PdfTextSource::Docling, true, Vec::new());
+
+        assert!(c.complete);
+        assert_eq!(c.pages, 2);
+        assert!(c.undecoded_formulas.is_empty());
+        assert!(c.untranscribed_images.is_empty());
+        assert!(c.low_text_pages.is_empty());
+        assert!(c.notes.is_empty());
+    }
+
+    #[test]
+    fn ocr_route_with_no_drops_is_complete_and_records_ocr_pages() {
+        let md = "--- p.1 ---\n\n\
+                  Recovered prose from a scanned page, long enough to clear \
+                  the low-text character floor after OCR has run over it.\n";
+        let c = Completeness::from_page_anchored_markdown(
+            md,
+            PdfTextSource::OcrThenDocling,
+            true,
+            vec![1],
+        );
+
+        assert!(c.complete);
+        assert_eq!(c.engine, PdfTextSource::OcrThenDocling);
+        assert_eq!(c.ocr_pages, vec![1]);
+    }
+
+    #[test]
+    fn enrichment_off_is_never_complete() {
+        let md = "--- p.1 ---\n\n\
+                  Prose without any markers at all, long enough to clear the \
+                  low-text floor, yet enrichment was not enabled here.\n";
+        let c = Completeness::from_page_anchored_markdown(
+            md,
+            PdfTextSource::Docling,
+            false,
+            Vec::new(),
+        );
+
+        assert!(!c.complete);
+        assert!(c.notes.iter().any(|n| n.contains("formula enrichment")));
+    }
+
+    #[test]
+    fn markdown_without_anchors_is_treated_as_a_single_page() {
+        let md = format!(
+            "Just one block of text with a formula. {}",
+            FORMULA_NOT_DECODED_MARKER
+        );
+        let c = Completeness::from_page_anchored_markdown(
+            &md,
+            PdfTextSource::Docling,
+            true,
+            Vec::new(),
+        );
+
+        assert_eq!(c.pages, 1);
+        assert_eq!(c.per_page_chars.len(), 1);
+        assert_eq!(c.undecoded_formulas, vec![1]);
+        assert!(!c.complete);
+    }
+
+    #[test]
+    fn flat_text_report_is_incomplete_with_note() {
+        let c = Completeness::flat_text(PdfTextSource::PdftotextFallback);
+
+        assert!(!c.complete);
+        assert_eq!(c.engine, PdfTextSource::PdftotextFallback);
+        assert_eq!(c.pages, 0);
+        assert!(c.per_page_chars.is_empty());
+        assert!(c.undecoded_formulas.is_empty());
+        assert!(c.untranscribed_images.is_empty());
+        assert!(c.ocr_pages.is_empty());
+        assert!(c.low_text_pages.is_empty());
+        assert_eq!(
+            c.notes,
+            vec!["flat-text engine cannot detect tables/formulas/images".to_string()]
+        );
+    }
+}
+
+#[cfg(test)]
+mod assembly_tests {
+    use super::*;
+
+    #[test]
+    fn sentinel_split_becomes_numbered_anchors() {
+        let md = format!(
+            "Page one.{s}Page two.{s}Page three.",
+            s = DOCLING_PAGE_BREAK_SENTINEL
+        );
+        let out = assemble_page_anchors(&md, DOCLING_PAGE_BREAK_SENTINEL);
+        assert_eq!(
+            out,
+            "--- p.1 ---\n\nPage one.\n\n--- p.2 ---\n\nPage two.\n\n--- p.3 ---\n\nPage three.\n"
+        );
+    }
+
+    #[test]
+    fn markdown_without_sentinel_gets_single_anchor() {
+        let out = assemble_page_anchors("Only page.", DOCLING_PAGE_BREAK_SENTINEL);
+        assert_eq!(out, "--- p.1 ---\n\nOnly page.\n");
+    }
+
+    #[test]
+    fn assembled_anchors_round_trip_into_completeness() {
+        let md = format!(
+            "First page prose.{}Second page with a formula. {}",
+            DOCLING_PAGE_BREAK_SENTINEL, FORMULA_NOT_DECODED_MARKER
+        );
+        let out = assemble_page_anchors(&md, DOCLING_PAGE_BREAK_SENTINEL);
+        let c = Completeness::from_page_anchored_markdown(
+            &out,
+            PdfTextSource::Docling,
+            true,
+            Vec::new(),
+        );
+        assert_eq!(c.pages, 2);
+        assert_eq!(c.undecoded_formulas, vec![2]);
+    }
+}
+
+#[cfg(test)]
+mod truncation_tests {
+    use super::*;
+
+    /// Three page-anchored pages: p.1 prose, p.2 a markdown table plus an
+    /// undecoded formula, p.3 an image marker plus a formula. Completeness
+    /// is derived from the markdown so the fixture is self-consistent.
+    fn three_page_result() -> PdfTextResult {
+        let text = format!(
+            "--- p.1 ---\n\n\
+             First page prose, comfortably long enough to clear the low-text \
+             floor used by the completeness derivation for this fixture.\n\n\
+             --- p.2 ---\n\n\
+             | Region | Q1 | Q2 |\n\
+             |---|---|---|\n\
+             | North | 1214 | 1180 |\n\
+             | South | 986 | 1002 |\n\n\
+             Prose after the table so this page clears the low-text floor \
+             with room to spare for the truncation assertions below.\n\n\
+             {formula}\n\n\
+             --- p.3 ---\n\n\
+             Third page prose that must be dropped by the truncation.\n\n\
+             {image}\n\n\
+             {formula}\n",
+            formula = FORMULA_NOT_DECODED_MARKER,
+            image = IMAGE_MARKER,
+        );
+        let completeness = Completeness::from_page_anchored_markdown(
+            &text,
+            PdfTextSource::Docling,
+            true,
+            Vec::new(),
+        );
+        let n = text.chars().count();
+        PdfTextResult {
+            text,
+            source: PdfTextSource::Docling,
+            character_count: n,
+            format: PdfFormat::Markdown,
+            page_anchors: true,
+            completeness,
+        }
+    }
+
+    #[test]
+    fn markdown_truncation_cuts_on_page_boundaries() {
+        let full = three_page_result();
+        let full_per_page = full.completeness.per_page_chars.clone();
+
+        let r = truncate_to_first_pages(full, 2);
+
+        // Retained pages are whole: anchors and the entire table survive.
+        assert!(r.text.contains("--- p.1 ---"));
+        assert!(r.text.contains("--- p.2 ---"));
+        assert!(r.text.contains("| North | 1214 | 1180 |"));
+        assert!(r.text.contains("| South | 986 | 1002 |"));
+        // Dropped page is gone entirely — anchor and content.
+        assert!(!r.text.contains("--- p.3 ---"));
+        assert!(!r.text.contains("Third page prose"));
+        assert!(r.text.contains("[... truncated: first 2 of 3 pages ...]"));
+
+        // The report describes only the retained pages.
+        assert_eq!(r.completeness.pages, 2);
+        assert_eq!(r.completeness.per_page_chars, full_per_page[..2].to_vec());
+        // p.2's formula survives; p.3's formula and image are filtered out.
+        assert_eq!(r.completeness.undecoded_formulas, vec![2]);
+        assert!(r.completeness.untranscribed_images.is_empty());
+        assert!(r
+            .completeness
+            .notes
+            .iter()
+            .any(|n| n.contains("truncated to the first 2 of 3 pages")));
+        assert_eq!(r.character_count, r.text.chars().count());
+    }
+
+    #[test]
+    fn markdown_truncation_is_a_noop_when_enough_pages_requested() {
+        let full = three_page_result();
+        let expected_text = full.text.clone();
+        let expected_completeness = full.completeness.clone();
+
+        let r = truncate_to_first_pages(full, 3);
+
+        assert_eq!(r.text, expected_text);
+        assert_eq!(r.completeness, expected_completeness);
+    }
+
+    #[test]
+    fn plain_truncation_caps_chars_and_declares_it() {
+        let body = "plain body text ".repeat(1000); // 16k chars
+        let n = body.chars().count();
+        let full = PdfTextResult {
+            text: body,
+            source: PdfTextSource::LiveExtract,
+            character_count: n,
+            format: PdfFormat::Plain,
+            page_anchors: false,
+            completeness: Completeness::flat_text(PdfTextSource::LiveExtract),
+        };
+
+        let r = truncate_to_first_pages(full, 2);
+
+        assert!(r.text.ends_with("[... truncated ...]"));
+        assert_eq!(r.character_count, r.text.chars().count());
+        assert!(
+            r.character_count <= 2 * 3500 + "\n[... truncated ...]".len(),
+            "char cap not applied: {}",
+            r.character_count
+        );
+        assert!(r
+            .completeness
+            .notes
+            .iter()
+            .any(|n| n.contains("truncated to the first 7000 characters")));
+    }
+
+    #[test]
+    fn plain_truncation_is_a_noop_for_short_text() {
+        let full = PdfTextResult {
+            text: "short plain body".into(),
+            source: PdfTextSource::LiveExtract,
+            character_count: 16,
+            format: PdfFormat::Plain,
+            page_anchors: false,
+            completeness: Completeness::flat_text(PdfTextSource::LiveExtract),
+        };
+        let r = truncate_to_first_pages(full, 2);
+        assert_eq!(r.text, "short plain body");
+        assert!(!r.completeness.notes.iter().any(|n| n.contains("truncated")));
+    }
 }
 
 #[cfg(test)]
@@ -504,7 +1777,12 @@ mod orchestrator_tests {
     }
 
     fn engines_with(primary: Arc<dyn PdfEngine>, fallback: FallbackState) -> PdfEngines {
-        PdfEngines { primary, fallback }
+        PdfEngines {
+            docling: None,
+            ocrmypdf: None,
+            primary,
+            fallback,
+        }
     }
 
     #[tokio::test]
@@ -517,10 +1795,11 @@ mod orchestrator_tests {
             StubEngine::never(),
             FallbackState::Ready(StubEngine::never()),
         );
-        let r = extract(&pdf, dir.path(), &engines).await.unwrap();
+        let r = extract(&pdf, dir.path(), &engines, false).await.unwrap();
 
         assert_eq!(r.source, PdfTextSource::ZoteroCache);
         assert!(r.text.contains("cached body"));
+        assert!(!r.completeness.complete);
     }
 
     #[tokio::test]
@@ -532,7 +1811,7 @@ mod orchestrator_tests {
             StubEngine::ok("primary text"),
             FallbackState::Ready(StubEngine::never()),
         );
-        let r = extract(&pdf, dir.path(), &engines).await.unwrap();
+        let r = extract(&pdf, dir.path(), &engines, false).await.unwrap();
 
         assert_eq!(r.source, PdfTextSource::LiveExtract);
         assert_eq!(r.text, "primary text");
@@ -551,10 +1830,16 @@ mod orchestrator_tests {
             StubEngine::fail("unhandled function type 4"),
             FallbackState::Ready(StubEngine::ok("recovered text")),
         );
-        let r = extract(&pdf, dir.path(), &engines).await.unwrap();
+        let r = extract(&pdf, dir.path(), &engines, false).await.unwrap();
 
         assert_eq!(r.source, PdfTextSource::PdftotextFallback);
         assert_eq!(r.text, "recovered text");
+        assert!(!r.completeness.complete);
+        assert!(r
+            .completeness
+            .notes
+            .iter()
+            .any(|n| n.contains("flat-text engine")));
         let cached = std::fs::read_to_string(dir.path().join(".zotero-ft-cache")).unwrap();
         assert!(cached.contains("recovered text"));
         assert!(cached.ends_with('\n'));
@@ -569,7 +1854,9 @@ mod orchestrator_tests {
             StubEngine::fail("primary boom"),
             FallbackState::Ready(StubEngine::fail("pdftotext boom")),
         );
-        let err = extract(&pdf, dir.path(), &engines).await.unwrap_err();
+        let err = extract(&pdf, dir.path(), &engines, false)
+            .await
+            .unwrap_err();
 
         match err {
             Error::PdfAllEnginesFailed {
@@ -589,7 +1876,9 @@ mod orchestrator_tests {
         let pdf = write_dummy_pdf(dir.path());
 
         let engines = engines_with(StubEngine::fail("primary"), FallbackState::BinaryMissing);
-        let err = extract(&pdf, dir.path(), &engines).await.unwrap_err();
+        let err = extract(&pdf, dir.path(), &engines, false)
+            .await
+            .unwrap_err();
         assert!(matches!(err, Error::PdftotextMissing));
     }
 
@@ -599,7 +1888,9 @@ mod orchestrator_tests {
         let pdf = write_dummy_pdf(dir.path());
 
         let engines = engines_with(StubEngine::fail("primary"), FallbackState::Disabled);
-        let err = extract(&pdf, dir.path(), &engines).await.unwrap_err();
+        let err = extract(&pdf, dir.path(), &engines, false)
+            .await
+            .unwrap_err();
         match err {
             Error::Pdf(msg) => assert_eq!(msg, "primary"),
             other => panic!("expected Error::Pdf, got {:?}", other),
@@ -615,7 +1906,30 @@ mod orchestrator_tests {
             StubEngine::fail("primary"),
             FallbackState::Ready(StubEngine::timeout(42)),
         );
-        let err = extract(&pdf, dir.path(), &engines).await.unwrap_err();
+        let err = extract(&pdf, dir.path(), &engines, false)
+            .await
+            .unwrap_err();
+        match err {
+            Error::PdftotextTimeout(secs, _) => assert_eq!(secs, 42),
+            other => panic!("expected PdftotextTimeout, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn sub_floor_primary_then_timeout_surfaces_timeout_not_scan_error() {
+        // A whitespace-heavy sub-floor primary "success" must not let a
+        // genuine (often transient) pdftotext timeout be masked as the
+        // permanent "install ocrmypdf" scan error.
+        let dir = TempDir::new().unwrap();
+        let pdf = write_dummy_pdf(dir.path());
+
+        let engines = engines_with(
+            StubEngine::ok("a b c"), // 3 non-whitespace chars: below the floor
+            FallbackState::Ready(StubEngine::timeout(42)),
+        );
+        let err = extract(&pdf, dir.path(), &engines, false)
+            .await
+            .unwrap_err();
         match err {
             Error::PdftotextTimeout(secs, _) => assert_eq!(secs, 42),
             other => panic!("expected PdftotextTimeout, got {:?}", other),
@@ -632,11 +1946,616 @@ mod orchestrator_tests {
 
         let engines = engines_with(
             StubEngine::fail("primary"),
-            FallbackState::Ready(StubEngine::ok("rescued")),
+            FallbackState::Ready(StubEngine::ok("rescued text from the stub fallback")),
         );
-        let r = extract(&pdf, &nonexistent, &engines).await.unwrap();
+        let r = extract(&pdf, &nonexistent, &engines, false).await.unwrap();
         assert_eq!(r.source, PdfTextSource::PdftotextFallback);
-        assert_eq!(r.text, "rescued");
+        assert_eq!(r.text, "rescued text from the stub fallback");
         assert!(!nonexistent.join(".zotero-ft-cache").exists());
+    }
+
+    // --- minimum-text floor (F1): sub-floor text is never success ---
+
+    #[tokio::test]
+    async fn whitespace_only_cache_is_not_returned_as_success() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join(".zotero-ft-cache"), "   \n\n \t \n").unwrap();
+        let pdf = write_dummy_pdf(dir.path());
+
+        let engines = engines_with(
+            StubEngine::ok("primary text recovered by the stub engine"),
+            FallbackState::Disabled,
+        );
+        let r = extract(&pdf, dir.path(), &engines, false).await.unwrap();
+
+        assert_eq!(
+            r.source,
+            PdfTextSource::LiveExtract,
+            "an empty/whitespace ft-cache must not be returned as success"
+        );
+        assert!(r.text.contains("primary text recovered"));
+    }
+
+    #[tokio::test]
+    async fn sub_floor_primary_text_continues_to_fallback() {
+        let dir = TempDir::new().unwrap();
+        let pdf = write_dummy_pdf(dir.path());
+
+        let engines = engines_with(
+            StubEngine::ok("x"),
+            FallbackState::Ready(StubEngine::ok("fallback recovered the real body text")),
+        );
+        let r = extract(&pdf, dir.path(), &engines, false).await.unwrap();
+
+        assert_eq!(
+            r.source,
+            PdfTextSource::PdftotextFallback,
+            "sub-floor primary output must be treated as 'did not extract'"
+        );
+        assert!(r.text.contains("fallback recovered"));
+    }
+
+    #[tokio::test]
+    async fn image_only_pdf_with_no_docling_and_no_ocr_errors_loudly() {
+        // scanned.pdf has no text layer; with no Docling route, no
+        // ocrmypdf, and only the real pdf-extract engine (which "succeeds"
+        // with near-empty text on scans), extraction must be a loud error
+        // naming the OCR remedy — never empty text as success.
+        let dir = TempDir::new().unwrap();
+        let engines = PdfEngines {
+            docling: None,
+            ocrmypdf: None,
+            primary: Arc::new(PdfExtractEngine),
+            fallback: FallbackState::Disabled,
+        };
+        let err = extract(&fixture("scanned.pdf"), dir.path(), &engines, false)
+            .await
+            .expect_err("near-empty extraction must not be success");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("ocrmypdf"),
+            "loud error must name the OCR remedy, got: {msg}"
+        );
+    }
+
+    // --- Docling route ordering (stubbed docling-serve via wiremock) ---
+
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn engines_with_docling(
+        url: &str,
+        primary: Arc<dyn PdfEngine>,
+        fallback: FallbackState,
+    ) -> PdfEngines {
+        PdfEngines {
+            docling: Some(Arc::new(DoclingEngine::new(
+                url.to_string(),
+                Duration::from_secs(10),
+                Duration::from_secs(2),
+            ))),
+            ocrmypdf: None,
+            primary,
+            fallback,
+        }
+    }
+
+    async fn mount_health(server: &MockServer, status: u16) {
+        Mock::given(method("GET"))
+            .and(path("/health"))
+            .respond_with(ResponseTemplate::new(status))
+            .mount(server)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn docling_success_preempts_cache_and_flat_engines() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join(".zotero-ft-cache"), "cached body\n").unwrap();
+        let pdf = write_dummy_pdf(dir.path());
+
+        let server = MockServer::start().await;
+        mount_health(&server, 200).await;
+        let md = format!(
+            "First page prose.{}Second page prose.",
+            DOCLING_PAGE_BREAK_SENTINEL
+        );
+        Mock::given(method("POST"))
+            .and(path("/v1/convert/file"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "document": { "md_content": md },
+                "status": "success",
+                "errors": []
+            })))
+            .mount(&server)
+            .await;
+
+        let engines = engines_with_docling(
+            &server.uri(),
+            StubEngine::never(),
+            FallbackState::Ready(StubEngine::never()),
+        );
+        let r = extract(&pdf, dir.path(), &engines, false).await.unwrap();
+
+        assert_eq!(r.source, PdfTextSource::Docling);
+        assert_eq!(r.format, PdfFormat::Markdown);
+        assert!(r.page_anchors);
+        assert!(r.text.contains("--- p.1 ---"));
+        assert!(r.text.contains("--- p.2 ---"));
+        assert!(r.text.contains("First page prose."));
+        assert_eq!(r.completeness.engine, PdfTextSource::Docling);
+        assert_eq!(r.completeness.pages, 2);
+        assert!(r.completeness.complete);
+    }
+
+    #[tokio::test]
+    async fn docling_enrichment_failure_retries_without_and_declares_the_gap() {
+        use wiremock::matchers::body_string_contains;
+
+        let dir = TempDir::new().unwrap();
+        let pdf = write_dummy_pdf(dir.path());
+
+        let server = MockServer::start().await;
+        mount_health(&server, 200).await;
+        // First convert (do_formula_enrichment=true) fails ...
+        Mock::given(method("POST"))
+            .and(path("/v1/convert/file"))
+            .and(body_string_contains("do_formula_enrichment"))
+            .and(body_string_contains("true"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "document": null,
+                "status": "failure",
+                "errors": []
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        // ... the retry without enrichment succeeds.
+        Mock::given(method("POST"))
+            .and(path("/v1/convert/file"))
+            .and(body_string_contains("do_formula_enrichment"))
+            .and(body_string_contains("false"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "document": { "md_content": "Recovered without enrichment." },
+                "status": "success",
+                "errors": []
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let engines = engines_with_docling(
+            &server.uri(),
+            StubEngine::never(),
+            FallbackState::Ready(StubEngine::never()),
+        );
+        let r = extract(&pdf, dir.path(), &engines, false).await.unwrap();
+
+        assert_eq!(r.source, PdfTextSource::Docling);
+        assert_eq!(r.format, PdfFormat::Markdown);
+        assert!(r.text.contains("Recovered without enrichment."));
+        // The gap is declared: enrichment was off, so never complete.
+        assert!(!r.completeness.complete);
+        assert!(r
+            .completeness
+            .notes
+            .iter()
+            .any(|n| n.contains("formula enrichment")));
+    }
+
+    /// Spec scenario "Enrichment unavailable", end to end through the
+    /// orchestrator: the service rejects `do_formula_enrichment=true`, the
+    /// retry without enrichment returns a formula region as an explicit
+    /// undecoded marker — the marker is preserved in the output text AND
+    /// its page is recorded in `completeness.undecoded_formulas`.
+    #[tokio::test]
+    async fn enrichment_unavailable_preserves_undecoded_marker_and_records_page() {
+        use wiremock::matchers::body_string_contains;
+
+        let dir = TempDir::new().unwrap();
+        let pdf = write_dummy_pdf(dir.path());
+
+        let server = MockServer::start().await;
+        mount_health(&server, 200).await;
+        // The enrichment convert fails server-side ...
+        Mock::given(method("POST"))
+            .and(path("/v1/convert/file"))
+            .and(body_string_contains("do_formula_enrichment"))
+            .and(body_string_contains("true"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("enrichment model missing"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        // ... the retry without enrichment succeeds, with the formula
+        // region preserved as an undecoded marker on page 2.
+        let md = format!(
+            "First page prose, long enough to clear the low-text floor used \
+             by the completeness derivation in this end-to-end test.{}A second \
+             page introducing an equation the service could not decode:\n\n{}\n\n\
+             followed by enough prose to clear the low-text floor here too.",
+            DOCLING_PAGE_BREAK_SENTINEL, FORMULA_NOT_DECODED_MARKER
+        );
+        Mock::given(method("POST"))
+            .and(path("/v1/convert/file"))
+            .and(body_string_contains("do_formula_enrichment"))
+            .and(body_string_contains("false"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "document": { "md_content": md },
+                "status": "success",
+                "errors": []
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let engines = engines_with_docling(
+            &server.uri(),
+            StubEngine::never(),
+            FallbackState::Ready(StubEngine::never()),
+        );
+        let r = extract(&pdf, dir.path(), &engines, false).await.unwrap();
+
+        assert_eq!(r.source, PdfTextSource::Docling);
+        // The formula region is preserved as an explicit undecoded marker,
+        // never silently omitted ...
+        assert!(
+            r.text.contains(FORMULA_NOT_DECODED_MARKER),
+            "undecoded marker missing from output: {:?}",
+            r.text
+        );
+        // ... and its page is recorded in the completeness report.
+        assert_eq!(r.completeness.undecoded_formulas, vec![2]);
+        assert!(!r.completeness.complete);
+        assert!(r
+            .completeness
+            .notes
+            .iter()
+            .any(|n| n.contains("formula enrichment")));
+    }
+
+    /// Spec scenario "Incomplete extraction is declared, not hidden":
+    /// a figure the layout route could not transcribe leaves the report
+    /// incomplete with the drop's page identified.
+    #[tokio::test]
+    async fn dropped_image_is_declared_with_its_page_not_hidden() {
+        let dir = TempDir::new().unwrap();
+        let pdf = write_dummy_pdf(dir.path());
+
+        let server = MockServer::start().await;
+        mount_health(&server, 200).await;
+        let md = format!(
+            "Opening page of prose, long enough to clear the low-text floor \
+             for the purposes of this drop-declaration test fixture.{}Second \
+             page carrying an untranscribed chart:\n\n{}\n\nplus enough \
+             surrounding prose to clear the low-text floor on this page.",
+            DOCLING_PAGE_BREAK_SENTINEL, IMAGE_MARKER
+        );
+        Mock::given(method("POST"))
+            .and(path("/v1/convert/file"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "document": { "md_content": md },
+                "status": "success",
+                "errors": []
+            })))
+            .mount(&server)
+            .await;
+
+        let engines = engines_with_docling(
+            &server.uri(),
+            StubEngine::never(),
+            FallbackState::Ready(StubEngine::never()),
+        );
+        let r = extract(&pdf, dir.path(), &engines, false).await.unwrap();
+
+        assert_eq!(r.source, PdfTextSource::Docling);
+        assert!(
+            !r.completeness.complete,
+            "a dropped figure must leave the report incomplete"
+        );
+        assert_eq!(
+            r.completeness.untranscribed_images,
+            vec![2],
+            "the drop's page must be identified"
+        );
+        assert!(r.text.contains(IMAGE_MARKER));
+    }
+
+    #[tokio::test]
+    async fn docling_unhealthy_falls_through_to_cache() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join(".zotero-ft-cache"), "cached body\n").unwrap();
+        let pdf = write_dummy_pdf(dir.path());
+
+        let server = MockServer::start().await;
+        mount_health(&server, 500).await;
+
+        let engines = engines_with_docling(
+            &server.uri(),
+            StubEngine::never(),
+            FallbackState::Ready(StubEngine::never()),
+        );
+        let r = extract(&pdf, dir.path(), &engines, false).await.unwrap();
+
+        assert_eq!(r.source, PdfTextSource::ZoteroCache);
+        assert_eq!(r.format, PdfFormat::Plain);
+        assert!(!r.completeness.complete);
+    }
+
+    #[tokio::test]
+    async fn docling_failure_status_falls_through_to_flat_chain() {
+        let dir = TempDir::new().unwrap();
+        let pdf = write_dummy_pdf(dir.path());
+
+        let server = MockServer::start().await;
+        mount_health(&server, 200).await;
+        Mock::given(method("POST"))
+            .and(path("/v1/convert/file"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "document": null,
+                "status": "failure",
+                "errors": []
+            })))
+            .mount(&server)
+            .await;
+
+        let engines = engines_with_docling(
+            &server.uri(),
+            StubEngine::ok("flat text from the stub primary engine"),
+            FallbackState::Ready(StubEngine::never()),
+        );
+        let r = extract(&pdf, dir.path(), &engines, false).await.unwrap();
+
+        assert_eq!(r.source, PdfTextSource::LiveExtract);
+        assert_eq!(r.format, PdfFormat::Plain);
+        assert!(!r.completeness.complete);
+        assert!(r
+            .completeness
+            .notes
+            .iter()
+            .any(|n| n.contains("flat-text engine")));
+    }
+
+    // --- OCR pre-step (real fixtures; docling stubbed via wiremock) ---
+
+    fn fixture(name: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures")
+            .join(name)
+    }
+
+    #[tokio::test]
+    async fn probe_reports_absent_for_scanned_fixture() {
+        assert!(
+            matches!(
+                probe_text_layer(&fixture("scanned.pdf")).await,
+                TextLayer::Absent
+            ),
+            "image-only scanned.pdf must probe as Absent (a definite scan)"
+        );
+    }
+
+    #[tokio::test]
+    async fn probe_reports_present_for_hello_fixture() {
+        assert!(
+            matches!(
+                probe_text_layer(&fixture("hello.pdf")).await,
+                TextLayer::Present
+            ),
+            "hello.pdf carries real text and must probe as Present"
+        );
+    }
+
+    #[tokio::test]
+    async fn probe_error_is_unknown_not_absent() {
+        // An unparseable PDF is ambiguous: the pre-step must not pre-empt
+        // Docling with OCR for it, but the last-ditch rescue may still try.
+        let dir = TempDir::new().unwrap();
+        let p = dir.path().join("junk.pdf");
+        std::fs::write(&p, b"this is not a pdf").unwrap();
+        assert!(
+            matches!(probe_text_layer(&p).await, TextLayer::Unknown),
+            "an unparseable PDF must probe as Unknown"
+        );
+    }
+
+    async fn mount_convert_md(server: &MockServer, md: &str) {
+        Mock::given(method("POST"))
+            .and(path("/v1/convert/file"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "document": { "md_content": md },
+                "status": "success",
+                "errors": []
+            })))
+            .mount(server)
+            .await;
+    }
+
+    fn engines_with_docling_and_ocr(url: &str, ocrmypdf: Option<PathBuf>) -> PdfEngines {
+        PdfEngines {
+            docling: Some(Arc::new(DoclingEngine::new(
+                url.to_string(),
+                Duration::from_secs(30),
+                Duration::from_secs(2),
+            ))),
+            ocrmypdf,
+            primary: StubEngine::never(),
+            fallback: FallbackState::Disabled,
+        }
+    }
+
+    #[tokio::test]
+    async fn ocr_prestep_labels_result_and_populates_ocr_pages() {
+        // Real ocrmypdf on the scanned fixture; Docling stubbed. Skips
+        // loudly only on hosts without ocrmypdf.
+        let Ok(bin) = which::which("ocrmypdf") else {
+            eprintln!("ocrmypdf not on PATH; skipping OCR pre-step test");
+            return;
+        };
+        let scanned = fixture("scanned.pdf");
+        let original_bytes = std::fs::read(&scanned).unwrap();
+
+        let dir = TempDir::new().unwrap();
+        let server = MockServer::start().await;
+        mount_health(&server, 200).await;
+        mount_convert_md(&server, "Scanned quarterly report recovered by OCR.").await;
+
+        let engines = engines_with_docling_and_ocr(&server.uri(), Some(bin));
+        let r = extract(&scanned, dir.path(), &engines, false)
+            .await
+            .unwrap();
+
+        assert_eq!(r.source, PdfTextSource::OcrThenDocling);
+        assert_eq!(r.format, PdfFormat::Markdown);
+        assert_eq!(r.completeness.engine, PdfTextSource::OcrThenDocling);
+        assert_eq!(r.completeness.ocr_pages, vec![1]);
+        assert!(r.text.contains("Scanned quarterly report"));
+        // The original scan is never mutated.
+        assert_eq!(
+            std::fs::read(&scanned).unwrap(),
+            original_bytes,
+            "scanned.pdf must be byte-identical after extraction"
+        );
+    }
+
+    #[tokio::test]
+    async fn bogus_ocrmypdf_path_degrades_gracefully_with_note() {
+        let dir = TempDir::new().unwrap();
+        let server = MockServer::start().await;
+        mount_health(&server, 200).await;
+        // Docling still converts the un-OCR'd scan (its own server-side OCR).
+        mount_convert_md(&server, "Server-side recovered text.").await;
+
+        let engines = engines_with_docling_and_ocr(
+            &server.uri(),
+            Some(PathBuf::from("/nonexistent/ocrmypdf-bogus")),
+        );
+        let r = extract(&fixture("scanned.pdf"), dir.path(), &engines, false)
+            .await
+            .unwrap();
+
+        assert_eq!(r.source, PdfTextSource::Docling);
+        assert!(!r.completeness.complete);
+        assert!(r.completeness.ocr_pages.is_empty());
+        assert!(
+            r.completeness
+                .notes
+                .iter()
+                .any(|n| n.contains("OCR pre-step failed")),
+            "notes must record the failed OCR pre-step: {:?}",
+            r.completeness.notes
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_ocrmypdf_degrades_gracefully_with_note() {
+        let dir = TempDir::new().unwrap();
+        let server = MockServer::start().await;
+        mount_health(&server, 200).await;
+        mount_convert_md(&server, "Server-side recovered text.").await;
+
+        let engines = engines_with_docling_and_ocr(&server.uri(), None);
+        let r = extract(&fixture("scanned.pdf"), dir.path(), &engines, false)
+            .await
+            .unwrap();
+
+        assert_eq!(r.source, PdfTextSource::Docling);
+        assert!(!r.completeness.complete);
+        assert!(r.completeness.ocr_pages.is_empty());
+        assert!(
+            r.completeness
+                .notes
+                .iter()
+                .any(|n| n.contains("ocrmypdf is not available")),
+            "notes must record the skipped OCR pre-step: {:?}",
+            r.completeness.notes
+        );
+    }
+
+    // --- plain option (forces the flat path; Docling must not be touched) ---
+
+    #[tokio::test]
+    async fn plain_true_skips_docling_and_uses_flat_path() {
+        let dir = TempDir::new().unwrap();
+        let pdf = write_dummy_pdf(dir.path());
+
+        let server = MockServer::start().await;
+        // Neither the health check nor the convert endpoint may be hit;
+        // the expectations are verified when the MockServer drops.
+        Mock::given(method("GET"))
+            .and(path("/health"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/convert/file"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let engines = engines_with_docling(
+            &server.uri(),
+            StubEngine::ok("flat text from the stub primary engine"),
+            FallbackState::Ready(StubEngine::never()),
+        );
+        let r = extract(&pdf, dir.path(), &engines, true).await.unwrap();
+
+        assert_eq!(r.source, PdfTextSource::LiveExtract);
+        assert_eq!(r.format, PdfFormat::Plain);
+        assert!(!r.page_anchors);
+        assert_eq!(r.text, "flat text from the stub primary engine");
+        assert!(!r.completeness.complete);
+        assert!(r
+            .completeness
+            .notes
+            .iter()
+            .any(|n| n.contains("flat-text engine")));
+    }
+
+    #[tokio::test]
+    async fn plain_true_all_engines_failed_is_still_a_loud_error() {
+        let dir = TempDir::new().unwrap();
+        let pdf = write_dummy_pdf(dir.path());
+
+        let server = MockServer::start().await;
+        mount_health(&server, 200).await;
+
+        let engines = engines_with_docling(
+            &server.uri(),
+            StubEngine::fail("primary boom"),
+            FallbackState::Ready(StubEngine::fail("pdftotext boom")),
+        );
+        let err = extract(&pdf, dir.path(), &engines, true).await.unwrap_err();
+
+        assert!(matches!(err, Error::PdfAllEnginesFailed { .. }));
+    }
+
+    #[tokio::test]
+    async fn docling_reported_errors_fall_through_to_flat_chain() {
+        let dir = TempDir::new().unwrap();
+        let pdf = write_dummy_pdf(dir.path());
+
+        let server = MockServer::start().await;
+        mount_health(&server, 200).await;
+        Mock::given(method("POST"))
+            .and(path("/v1/convert/file"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "document": { "md_content": "ignored" },
+                "status": "success",
+                "errors": ["page 3 exploded"]
+            })))
+            .mount(&server)
+            .await;
+
+        let engines = engines_with_docling(
+            &server.uri(),
+            StubEngine::ok("flat text from the stub primary engine"),
+            FallbackState::Ready(StubEngine::never()),
+        );
+        let r = extract(&pdf, dir.path(), &engines, false).await.unwrap();
+
+        assert_eq!(r.source, PdfTextSource::LiveExtract);
+        assert!(!r.completeness.complete);
     }
 }

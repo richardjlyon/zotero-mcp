@@ -52,6 +52,31 @@ pub struct ZoteroConfig {
     #[serde(default = "default_true")]
     pub pdftotext_fallback: bool,
 
+    /// Base URL of the Docling conversion service used as the layout-aware
+    /// primary extraction route (e.g. "http://100.79.12.8:5001"). The
+    /// `DOCLING_URL` environment variable takes precedence over this value.
+    /// When neither is set, the Docling route is disabled and extraction
+    /// uses the flat-text chain only.
+    #[serde(default)]
+    pub docling_url: Option<String>,
+
+    /// Wall-clock timeout for a Docling convert request, in seconds.
+    /// Default: 300 (formula enrichment on large PDFs is slow).
+    #[serde(default = "default_docling_convert_timeout_secs")]
+    pub docling_convert_timeout_secs: u64,
+
+    /// Timeout for the Docling `/health` probe, in seconds. Default: 5.
+    #[serde(default = "default_docling_health_timeout_secs")]
+    pub docling_health_timeout_secs: u64,
+
+    /// Optional explicit path to the `ocrmypdf` binary used by the OCR
+    /// pre-step for image-only (scanned) PDFs. When set and the file
+    /// exists, used instead of PATH lookup. When `ocrmypdf` cannot be
+    /// resolved at all, the OCR pre-step is skipped and extraction
+    /// degrades gracefully (recorded in the completeness report).
+    #[serde(default)]
+    pub ocrmypdf_path: Option<String>,
+
     /// Storage model for attachments created via `attach_file`. Default
     /// mirrors Zotero's own default behaviour. Set to `"linked_file"` for
     /// BYO-storage users (Resilio Sync, Syncthing, NAS-backed Zotero data dirs).
@@ -75,6 +100,14 @@ fn default_true() -> bool {
     true
 }
 
+fn default_docling_convert_timeout_secs() -> u64 {
+    300
+}
+
+fn default_docling_health_timeout_secs() -> u64 {
+    5
+}
+
 fn default_attachment_mode() -> String {
     "imported_file".into()
 }
@@ -96,6 +129,10 @@ impl Default for ZoteroConfig {
             max_schema_userdata: 135,
             pdftotext_path: None,
             pdftotext_fallback: true,
+            docling_url: None,
+            docling_convert_timeout_secs: 300,
+            docling_health_timeout_secs: 5,
+            ocrmypdf_path: None,
             attachment_mode: "imported_file".into(),
             linked_attachment_base_dir: None,
             max_attachment_bytes: 50 * 1024 * 1024,
@@ -292,6 +329,50 @@ pdftotext_fallback = false
             Some("/opt/homebrew/bin/pdftotext")
         );
         assert!(!c.zotero.pdftotext_fallback);
+    }
+
+    #[test]
+    fn docling_defaults_to_disabled_with_timeouts() {
+        let c = Config::default();
+        assert!(c.zotero.docling_url.is_none());
+        assert_eq!(c.zotero.docling_convert_timeout_secs, 300);
+        assert_eq!(c.zotero.docling_health_timeout_secs, 5);
+    }
+
+    #[test]
+    fn docling_config_parses_from_toml() {
+        let toml = r#"
+[zotero]
+docling_url = "http://100.79.12.8:5001"
+docling_convert_timeout_secs = 120
+docling_health_timeout_secs = 3
+"#;
+        let c: Config = toml::from_str(toml).unwrap();
+        assert_eq!(
+            c.zotero.docling_url.as_deref(),
+            Some("http://100.79.12.8:5001")
+        );
+        assert_eq!(c.zotero.docling_convert_timeout_secs, 120);
+        assert_eq!(c.zotero.docling_health_timeout_secs, 3);
+    }
+
+    #[test]
+    fn ocrmypdf_path_defaults_to_none() {
+        let c = Config::default();
+        assert!(c.zotero.ocrmypdf_path.is_none());
+    }
+
+    #[test]
+    fn ocrmypdf_path_parses_from_toml() {
+        let toml = r#"
+[zotero]
+ocrmypdf_path = "/Users/rjl/.local/bin/ocrmypdf"
+"#;
+        let c: Config = toml::from_str(toml).unwrap();
+        assert_eq!(
+            c.zotero.ocrmypdf_path.as_deref(),
+            Some("/Users/rjl/.local/bin/ocrmypdf")
+        );
     }
 
     #[test]
