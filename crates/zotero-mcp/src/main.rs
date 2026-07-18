@@ -27,6 +27,30 @@ enum Command {
     /// Print the current OAuth client_id, client_secret, and connector URL
     /// from <config_dir>/oauth.toml in paste-ready form.
     ShowCredentials,
+    /// Extract a PDF attachment's text to stdout — the same layout-aware,
+    /// OCR-capable engine as the `get_pdf_text` MCP tool. Whole-document by
+    /// default; a large scan that exceeds the whole-document page limit is
+    /// walked in page windows internally and streamed to stdout in full, so
+    /// callers (e.g. a fact-check arbiter) get complete text in one command
+    /// without orchestrating the window loop themselves. A diagnostic header
+    /// (route, pages, completeness) is written to stderr; stdout is only the
+    /// document text.
+    PdfText {
+        /// The parent item key (not the attachment key).
+        item_key: String,
+        /// First page of an explicit window (1-indexed, inclusive).
+        #[arg(long)]
+        from: Option<u32>,
+        /// Last page of an explicit window (1-indexed, inclusive).
+        #[arg(long)]
+        to: Option<u32>,
+        /// Force the flat-text path (no Docling, no OCR, no page anchors).
+        #[arg(long)]
+        plain: bool,
+        /// Page-window size used when auto-walking a large document.
+        #[arg(long, default_value_t = 25)]
+        window_size: u32,
+    },
 }
 
 #[tokio::main]
@@ -36,8 +60,101 @@ async fn main() -> anyhow::Result<()> {
         Some(Command::Setup) => setup::run_setup().await,
         Some(Command::Status) => setup::run_status().await,
         Some(Command::ShowCredentials) => setup::run_show_credentials(),
+        Some(Command::PdfText {
+            item_key,
+            from,
+            to,
+            plain,
+            window_size,
+        }) => run_pdf_text(item_key, from, to, plain, window_size).await,
         None => run_server().await,
     }
+}
+
+/// `pdf-text` subcommand: extract an item's PDF via the same engine stack as
+/// the MCP tool, printing the document text to stdout. Large scans are walked
+/// in windows internally (stdout has no response-size ceiling, unlike an MCP
+/// tool result), so one command yields the whole document.
+async fn run_pdf_text(
+    item_key: String,
+    from: Option<u32>,
+    to: Option<u32>,
+    plain: bool,
+    window_size: u32,
+) -> anyhow::Result<()> {
+    use std::io::Write;
+    use zcore::error::Error as ZError;
+    use zcore::pdf::get_pdf_text;
+
+    let cfg = zcore::Config::load().unwrap_or_default();
+    // Logging goes to the log dir (never stdout), so stdout stays pure text.
+    logging::init(&cfg.logging.level, Some(&cfg.resolved_log_dir()))?;
+    let state = state::AppState::build(cfg).await?;
+    let storage = state.cfg.storage_dir();
+    let window_size = window_size.max(1);
+
+    let header = |r: &zcore::pdf::PdfTextResult, span: &str| {
+        eprintln!(
+            "[pdf-text {item_key} | route: {:?} | pages: {} | total: {} | complete: {} | {span}]",
+            r.source, r.completeness.pages, r.completeness.total_pages, r.completeness.complete
+        );
+    };
+
+    // Explicit window: one call, print it.
+    if from.is_some() || to.is_some() {
+        let f = from.unwrap_or(1).max(1);
+        let t = to.unwrap_or(f).max(f);
+        let r = get_pdf_text(&state.pool, &item_key, 1, &storage, &state.pdf_engines, plain, Some((f, t)))
+            .await?;
+        header(&r, &format!("window {f}..={t}"));
+        print!("{}", r.text);
+        std::io::stdout().flush().ok();
+        return Ok(());
+    }
+
+    // Whole document; on the large-document guard, walk windows and stream.
+    match get_pdf_text(&state.pool, &item_key, 1, &storage, &state.pdf_engines, plain, None).await {
+        Ok(r) => {
+            header(&r, "whole document");
+            print!("{}", r.text);
+        }
+        Err(ZError::PdfDocumentTooLarge { pages, .. }) => {
+            eprintln!(
+                "[pdf-text {item_key} | {pages} pages exceed the whole-document limit; \
+                 walking {window_size}-page windows]"
+            );
+            let mut start = 1u32;
+            let mut out = String::new();
+            while start <= pages {
+                let end = (start + window_size - 1).min(pages);
+                let r = get_pdf_text(
+                    &state.pool,
+                    &item_key,
+                    1,
+                    &storage,
+                    &state.pdf_engines,
+                    plain,
+                    Some((start, end)),
+                )
+                .await?;
+                eprintln!(
+                    "[pdf-text {item_key} | window {start}..={end} of {pages} | route: {:?} | \
+                     complete: {}]",
+                    r.source, r.completeness.complete
+                );
+                if !out.is_empty() {
+                    out.push_str("\n\n");
+                }
+                out.push_str(r.text.trim_end());
+                start = end + 1;
+            }
+            out.push('\n');
+            print!("{out}");
+        }
+        Err(e) => return Err(e.into()),
+    }
+    std::io::stdout().flush().ok();
+    Ok(())
 }
 
 async fn run_server() -> anyhow::Result<()> {

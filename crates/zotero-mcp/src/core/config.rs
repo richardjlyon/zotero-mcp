@@ -94,6 +94,14 @@ pub struct ZoteroConfig {
     /// pre-flight. Default: 50 MB.
     #[serde(default = "default_max_attachment_bytes")]
     pub max_attachment_bytes: usize,
+
+    /// Page ceiling for a *whole-document* PDF text extraction. A
+    /// whole-document request on a PDF with more pages than this is refused
+    /// with a loud error directing the caller to windowed (page-range)
+    /// extraction, rather than attempting a doomed multi-minute OCR/convert.
+    /// Windowed requests are never refused on size. Default: 50.
+    #[serde(default = "default_pdf_whole_document_max_pages")]
+    pub pdf_whole_document_max_pages: u32,
 }
 
 fn default_true() -> bool {
@@ -116,6 +124,10 @@ fn default_max_attachment_bytes() -> usize {
     50 * 1024 * 1024
 }
 
+fn default_pdf_whole_document_max_pages() -> u32 {
+    50
+}
+
 impl Default for ZoteroConfig {
     fn default() -> Self {
         Self {
@@ -136,6 +148,7 @@ impl Default for ZoteroConfig {
             attachment_mode: "imported_file".into(),
             linked_attachment_base_dir: None,
             max_attachment_bytes: 50 * 1024 * 1024,
+            pdf_whole_document_max_pages: 50,
         }
     }
 }
@@ -381,6 +394,22 @@ ocrmypdf_path = "/Users/rjl/.local/bin/ocrmypdf"
         assert_eq!(c.zotero.attachment_mode, "imported_file");
         assert!(c.zotero.linked_attachment_base_dir.is_none());
         assert_eq!(c.zotero.max_attachment_bytes, 50 * 1024 * 1024);
+    }
+
+    #[test]
+    fn pdf_whole_document_max_pages_defaults_to_50() {
+        let c = Config::default();
+        assert_eq!(c.zotero.pdf_whole_document_max_pages, 50);
+    }
+
+    #[test]
+    fn pdf_whole_document_max_pages_parses_from_toml() {
+        let toml = r#"
+[zotero]
+pdf_whole_document_max_pages = 12
+"#;
+        let c: Config = toml::from_str(toml).unwrap();
+        assert_eq!(c.zotero.pdf_whole_document_max_pages, 12);
     }
 
     #[test]

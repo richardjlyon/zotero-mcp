@@ -10,6 +10,26 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 > `get_pdf_first_pages` result shape changed (additive fields, but the
 > default output format on the primary route is now markdown).
 
+### Added
+
+- **Page-windowed PDF extraction.** `get_pdf_text` accepts optional
+  `from_page` / `to_page` (1-indexed, inclusive) to extract a bounded page
+  *window* instead of the whole document. The requested pages are sliced
+  locally (`lopdf`) and only that slice is OCR'd and converted, so a large
+  or scanned PDF stays tractable — per-call work is bounded by the window,
+  not the document. Page anchors carry the document's true page numbers.
+  This makes any reference in the library — scanned or not, of any length —
+  readable in full through the MCP by walking windows.
+- **Total page count.** `completeness` gains `total_pages`: the document's
+  true page count, independent of the returned window, so a caller knows how
+  many windows remain. `get_pdf_first_pages` now extracts only its `[1, n]`
+  window rather than processing the whole document and truncating — so the
+  opening pages of a large scan are reachable.
+- **Large-document guard.** A *whole-document* request on a PDF with more
+  than `pdf_whole_document_max_pages` pages (config, default 50) is refused
+  with a loud `PdfDocumentTooLarge` error naming windowed extraction and the
+  page count — never a silent timeout or empty success.
+
 ### Changed
 
 - **`get_pdf_text` / `get_pdf_first_pages` result shape.** `PdfTextResult`

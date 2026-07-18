@@ -47,6 +47,7 @@ toml.workspace = true
 # Merged from former zotero-core crate (the low-level Zotero readers/writers,
 # enrichment HTTP clients, citation rendering, PDF/webpage extraction).
 deadpool-sqlite.workspace = true
+lopdf.workspace = true
 miette.workspace = true
 pdf-extract.workspace = true
 readability.workspace = true

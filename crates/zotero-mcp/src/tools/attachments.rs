@@ -59,6 +59,33 @@ pub struct PdfTextArgs {
     /// anchors), skipping the layout-aware Docling route.
     #[serde(default)]
     pub plain: bool,
+    /// First page to extract (1-indexed, inclusive). Together with `to_page`
+    /// this requests a bounded page *window* instead of the whole document,
+    /// so large and scanned PDFs stay tractable — extraction work is bounded
+    /// by the window, not the document. Omit both for the whole document;
+    /// large whole-document requests are refused with a page-count hint, so
+    /// walk big documents in windows (e.g. ~20 pages at a time). The result's
+    /// `completeness.total_pages` tells you how many pages exist.
+    #[serde(default)]
+    pub from_page: Option<u32>,
+    /// Last page to extract (1-indexed, inclusive). See `from_page`.
+    #[serde(default)]
+    pub to_page: Option<u32>,
+}
+
+/// Build an optional `(from, to)` window from the two optional page args.
+/// Any window with a bound present is honoured (a missing `from` defaults to
+/// page 1, a missing `to` defaults to `from`); both absent means whole
+/// document.
+fn page_window(from: Option<u32>, to: Option<u32>) -> Option<(u32, u32)> {
+    match (from, to) {
+        (None, None) => None,
+        (f, t) => {
+            let from = f.unwrap_or(1).max(1);
+            let to = t.unwrap_or(from).max(from);
+            Some((from, to))
+        }
+    }
 }
 
 pub async fn get_pdf_text_t(s: &AppState, a: PdfTextArgs) -> Result<Json<PdfTextResult>, Error> {
@@ -69,6 +96,7 @@ pub async fn get_pdf_text_t(s: &AppState, a: PdfTextArgs) -> Result<Json<PdfText
         &s.cfg.storage_dir(),
         &s.pdf_engines,
         a.plain,
+        page_window(a.from_page, a.to_page),
     )
     .await
     .map_err(map_err)?;
