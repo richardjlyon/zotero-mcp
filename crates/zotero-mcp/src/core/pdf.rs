@@ -85,8 +85,14 @@ pub struct Completeness {
     pub complete: bool,
     /// The engine that produced the text this report describes.
     pub engine: PdfTextSource,
+    /// The document's true total page count, independent of the returned
+    /// window. 0 when it could not be determined. A caller walks a large
+    /// document by requesting windows until this many pages are covered.
+    #[serde(default)]
+    pub total_pages: u32,
     /// Number of pages seen in the page-anchored output (0 when the engine
-    /// cannot report pages, i.e. the flat-text chain).
+    /// cannot report pages, i.e. the flat-text chain). Describes only the
+    /// returned window, which may be a subset of `total_pages`.
     pub pages: u32,
     /// Character count per page (markers excluded), in page order.
     pub per_page_chars: Vec<usize>,
@@ -110,6 +116,7 @@ impl Completeness {
         Self {
             complete: false,
             engine,
+            total_pages: 0,
             pages: 0,
             per_page_chars: Vec::new(),
             undecoded_formulas: Vec::new(),
@@ -189,6 +196,7 @@ impl Completeness {
         Self {
             complete,
             engine,
+            total_pages: 0,
             pages: pages.len() as u32,
             per_page_chars,
             undecoded_formulas,
@@ -208,15 +216,18 @@ fn parse_page_anchor(line: &str) -> Option<u32> {
 }
 
 /// Replace the Docling page-break sentinel with `--- p.N ---` anchors,
-/// numbering pages from 1. The first page's anchor is prepended, so the
-/// output always starts with `--- p.1 ---`. Pure — no I/O.
-fn assemble_page_anchors(markdown: &str, sentinel: &str) -> String {
+/// numbering pages from `start_page`. For a whole-document convert
+/// `start_page` is 1, so output starts with `--- p.1 ---`; for a windowed
+/// convert (the PDF was sliced to pages `start_page..`) the anchors carry
+/// the document's *true* page numbers, e.g. a window beginning at page 5
+/// starts with `--- p.5 ---`. Pure — no I/O.
+fn assemble_page_anchors(markdown: &str, sentinel: &str, start_page: u32) -> String {
     let mut out = String::with_capacity(markdown.len() + 64);
     for (i, page) in markdown.split(sentinel).enumerate() {
         if i > 0 {
             out.push_str("\n\n");
         }
-        out.push_str(&format!("--- p.{} ---\n\n", i + 1));
+        out.push_str(&format!("--- p.{} ---\n\n", start_page + i as u32));
         out.push_str(page.trim());
     }
     out.push('\n');
@@ -308,6 +319,10 @@ pub struct PdfEngines {
     ocrmypdf: Option<PathBuf>,
     primary: Arc<dyn PdfEngine>,
     fallback: FallbackState,
+    /// Page ceiling for a whole-document (un-windowed) extraction; above it
+    /// the orchestrator refuses with `PdfDocumentTooLarge` and directs the
+    /// caller to page windows. From `cfg.pdf_whole_document_max_pages`.
+    whole_document_max_pages: u32,
 }
 
 #[derive(Clone)]
@@ -336,6 +351,10 @@ impl PdfEngines {
 
     pub fn fallback(&self) -> &FallbackState {
         &self.fallback
+    }
+
+    pub fn whole_document_max_pages(&self) -> u32 {
+        self.whole_document_max_pages
     }
 
     /// Replace the Docling route on an already-built bundle. Lets
@@ -421,6 +440,7 @@ impl PdfEngines {
             ocrmypdf,
             primary,
             fallback,
+            whole_document_max_pages: cfg.pdf_whole_document_max_pages,
         }
     }
 }
@@ -648,9 +668,14 @@ impl DoclingEngine {
     /// `formula_enrichment: false` makes the completeness report declare
     /// the gap (`complete: false` + enrichment note) rather than lose the
     /// document entirely.
+    /// `start_page` is the document page number the first converted page
+    /// corresponds to (1 for a whole-document convert; the window start when
+    /// `path` is a locally-sliced window), used to number the `--- p.N ---`
+    /// anchors with true document page numbers.
     pub async fn extract_markdown(
         &self,
         path: &Path,
+        start_page: u32,
     ) -> std::result::Result<DoclingExtraction, EngineError> {
         let bytes = tokio::fs::read(path).await.map_err(|e| {
             EngineError::Failed(format!("docling: failed to read {}: {}", path.display(), e))
@@ -660,7 +685,7 @@ impl DoclingEngine {
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "document.pdf".into());
 
-        match self.convert(&bytes, &file_name, true).await {
+        match self.convert(&bytes, &file_name, true, start_page).await {
             Ok(markdown) => Ok(DoclingExtraction {
                 markdown,
                 formula_enrichment: true,
@@ -671,7 +696,7 @@ impl DoclingEngine {
                     path = %path.display(),
                     "docling convert with formula enrichment failed; retrying without enrichment"
                 );
-                let markdown = self.convert(&bytes, &file_name, false).await?;
+                let markdown = self.convert(&bytes, &file_name, false, start_page).await?;
                 Ok(DoclingExtraction {
                     markdown,
                     formula_enrichment: false,
@@ -688,6 +713,7 @@ impl DoclingEngine {
         bytes: &[u8],
         file_name: &str,
         formula_enrichment: bool,
+        start_page: u32,
     ) -> std::result::Result<String, EngineError> {
         let part = reqwest::multipart::Part::bytes(bytes.to_vec())
             .file_name(file_name.to_string())
@@ -754,7 +780,11 @@ impl DoclingEngine {
             ));
         }
 
-        Ok(assemble_page_anchors(&md, DOCLING_PAGE_BREAK_SENTINEL))
+        Ok(assemble_page_anchors(
+            &md,
+            DOCLING_PAGE_BREAK_SENTINEL,
+            start_page,
+        ))
     }
 }
 
@@ -872,6 +902,94 @@ async fn run_ocrmypdf(binary: &Path, pdf_path: &Path) -> std::result::Result<Tem
     Ok(guard)
 }
 
+/// The document's true total page count, independent of any window and of
+/// the extraction engines. `lopdf` (pure Rust) first; Poppler `pdfinfo`
+/// fallback when `lopdf` cannot parse the file; `0` when neither can — the
+/// orchestrator then records the unknown count in a note rather than
+/// failing. Runs the blocking `lopdf` parse off the async runtime.
+async fn total_page_count(path: &Path) -> u32 {
+    let p = path.to_path_buf();
+    let via_lopdf = tokio::task::spawn_blocking(move || {
+        lopdf::Document::load(&p)
+            .ok()
+            .map(|doc| doc.get_pages().len() as u32)
+            .filter(|n| *n > 0)
+    })
+    .await
+    .ok()
+    .flatten();
+    if let Some(n) = via_lopdf {
+        return n;
+    }
+    // pdfinfo fallback (Poppler): `Pages:            N`.
+    if let Ok(bin) = which::which("pdfinfo") {
+        if let Ok(out) = tokio::process::Command::new(bin)
+            .arg("--")
+            .arg(path)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .await
+        {
+            if out.status.success() {
+                let text = String::from_utf8_lossy(&out.stdout);
+                for line in text.lines() {
+                    if let Some(rest) = line.strip_prefix("Pages:") {
+                        if let Ok(n) = rest.trim().parse::<u32>() {
+                            return n;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    0
+}
+
+/// Slice pages `from..=to` (1-indexed, inclusive; assumed already clamped to
+/// `1..=total`) of `pdf_path` into a fresh temp PDF via `lopdf`, returning a
+/// guard that deletes it on drop. The original file is only ever read. Pure
+/// structural surgery — no rendering, no OCR — so it stays cheap even for a
+/// window of a very large scan. Runs off the async runtime.
+async fn slice_pages(
+    pdf_path: &Path,
+    from: u32,
+    to: u32,
+    total: u32,
+) -> std::result::Result<TempPdf, EngineError> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let out = std::env::temp_dir().join(format!(
+        "zotero-mcp-slice-{}-{}.pdf",
+        std::process::id(),
+        nanos
+    ));
+    let guard = TempPdf(out.clone());
+    let src = pdf_path.to_path_buf();
+    let dst = out.clone();
+    let res = tokio::task::spawn_blocking(move || -> std::result::Result<(), String> {
+        let mut doc = lopdf::Document::load(&src).map_err(|e| e.to_string())?;
+        // Delete every page outside the window in one call — delete_pages
+        // resolves page numbers against the original numbering, so passing
+        // all out-of-window pages together is correct.
+        let to_delete: Vec<u32> = (1..from).chain((to + 1)..=total).collect();
+        if !to_delete.is_empty() {
+            doc.delete_pages(&to_delete);
+        }
+        doc.prune_objects();
+        doc.save(&dst).map_err(|e| e.to_string())?;
+        Ok(())
+    })
+    .await;
+    match res {
+        Ok(Ok(())) => Ok(guard),
+        Ok(Err(e)) => Err(EngineError::Failed(format!("failed to slice pages: {}", e))),
+        Err(je) => Err(EngineError::Failed(format!("slice task failed: {}", je))),
+    }
+}
+
 pub async fn get_pdf_text(
     pool: &ReadOnlyPool,
     parent_key: &str,
@@ -879,13 +997,14 @@ pub async fn get_pdf_text(
     storage_dir: &Path,
     engines: &PdfEngines,
     plain: bool,
+    window: Option<(u32, u32)>,
 ) -> Result<PdfTextResult> {
     let pdf_path = resolve_path(pool, parent_key, library_id, storage_dir).await?;
     let storage_item_dir = pdf_path
         .parent()
         .ok_or_else(|| Error::AttachmentNotFound(parent_key.into()))?
         .to_path_buf();
-    extract(&pdf_path, &storage_item_dir, engines, plain).await
+    extract_windowed(&pdf_path, &storage_item_dir, engines, plain, window).await
 }
 
 pub async fn get_pdf_first_pages(
@@ -897,7 +1016,25 @@ pub async fn get_pdf_first_pages(
     engines: &PdfEngines,
     plain: bool,
 ) -> Result<PdfTextResult> {
-    let full = get_pdf_text(pool, parent_key, library_id, storage_dir, engines, plain).await?;
+    // The first N pages ARE a page window `[1, n]`: extract only that window
+    // so a large (or scanned) document is not fully processed just to return
+    // its opening pages. The flat-text path (no page anchors) still cannot
+    // page-slice its own output, so `truncate_to_first_pages` also caps it.
+    let window = if n_pages == 0 {
+        Some((1, 1))
+    } else {
+        Some((1, n_pages as u32))
+    };
+    let full = get_pdf_text(
+        pool,
+        parent_key,
+        library_id,
+        storage_dir,
+        engines,
+        plain,
+        window,
+    )
+    .await?;
     Ok(truncate_to_first_pages(full, n_pages))
 }
 
@@ -999,20 +1136,124 @@ pub fn truncate_to_first_pages(full: PdfTextResult, n_pages: usize) -> PdfTextRe
     }
 }
 
-/// Core orchestrator: Docling (layout-aware primary route, with an OCR
-/// pre-step for scanned PDFs) → cache check → primary engine → fallback
-/// engine. Public so integration tests (and callers already holding a
-/// resolved PDF path) can drive the full route stack directly.
-///
-/// `plain: true` forces the old flat-text path (format `Plain`, no page
-/// anchors): the Docling route is skipped entirely and the chain runs
-/// cache → pdf-extract → pdftotext, still failing loudly when nothing
-/// extracts.
+/// Whole-document orchestrator — the historical entry point. Equivalent to
+/// [`extract_windowed`] with no page window. Public so integration tests
+/// (and callers already holding a resolved PDF path) can drive the full
+/// route stack directly.
 pub async fn extract(
     pdf_path: &Path,
     storage_item_dir: &Path,
     engines: &PdfEngines,
     plain: bool,
+) -> Result<PdfTextResult> {
+    extract_windowed(pdf_path, storage_item_dir, engines, plain, None).await
+}
+
+/// Windowed orchestrator.
+///
+/// `window: Some((from, to))` extracts only that inclusive 1-indexed page
+/// range: the PDF is sliced to those pages locally (`lopdf`) and the slice —
+/// not the whole file — is what every route (Docling, OCR, flat chain) sees,
+/// so per-call work is bounded by the window, not the document size. Page
+/// anchors carry the document's true page numbers. `window: None` extracts
+/// the whole document, but a whole-document request on a PDF exceeding
+/// `engines.whole_document_max_pages()` is refused with `PdfDocumentTooLarge`
+/// so a large scan is never silently un-extractable — it is read via windows.
+///
+/// Every result reports the document's true `total_pages`, independent of the
+/// window, so a caller can walk a large document window by window.
+pub async fn extract_windowed(
+    pdf_path: &Path,
+    storage_item_dir: &Path,
+    engines: &PdfEngines,
+    plain: bool,
+    window: Option<(u32, u32)>,
+) -> Result<PdfTextResult> {
+    // Total page count up front (engine-independent): reported on every
+    // result and the gate for the large-document guard.
+    let total = total_page_count(pdf_path).await;
+
+    // A large whole-document request is refused, not silently attempted:
+    // OCR + layout conversion over hundreds of pages would exceed the time
+    // budget and the response size. Windowed requests are never refused.
+    if window.is_none() && total > engines.whole_document_max_pages() {
+        return Err(Error::PdfDocumentTooLarge {
+            path: pdf_path.display().to_string(),
+            pages: total,
+            threshold: engines.whole_document_max_pages(),
+        });
+    }
+
+    // Resolve the window to a working file. When a sub-range is requested we
+    // slice those pages into a temp PDF (cheap structural surgery) and run
+    // the whole pipeline over the slice; `start_page` offsets the page
+    // anchors back to true document page numbers. `_slice_guard` keeps the
+    // temp file alive for the duration of extraction.
+    let mut start_page: u32 = 1;
+    let mut window_note: Option<String> = None;
+    let _slice_guard: Option<TempPdf>;
+    let working_path: PathBuf = match window {
+        Some((from, to)) if total > 0 => {
+            let from = from.max(1).min(total);
+            let to = to.max(from).min(total);
+            start_page = from;
+            window_note = Some(format!(
+                "page window {from}..={to} of {total} total pages; this result and its \
+                 completeness report describe only these pages"
+            ));
+            if from == 1 && to == total {
+                _slice_guard = None;
+                pdf_path.to_path_buf()
+            } else {
+                let temp = slice_pages(pdf_path, from, to, total).await.map_err(|e| {
+                    Error::Pdf(format!("failed to slice page window {from}..={to}: {e}"))
+                })?;
+                let p = temp.path().to_path_buf();
+                _slice_guard = Some(temp);
+                p
+            }
+        }
+        // A window was requested but the page count is unknown: process the
+        // whole file (bounded only by the engine timeouts) rather than guess
+        // a slice, and say so.
+        Some((from, to)) => {
+            start_page = from.max(1);
+            window_note = Some(format!(
+                "page window {from}..={to} requested but the document page count could \
+                 not be determined; extracted whole-document instead"
+            ));
+            _slice_guard = None;
+            pdf_path.to_path_buf()
+        }
+        None => {
+            _slice_guard = None;
+            pdf_path.to_path_buf()
+        }
+    };
+    // The `.zotero-ft-cache` is the WHOLE-document Zotero extraction; it must
+    // neither be read as, nor overwritten by, a single window.
+    let use_cache = window.is_none();
+
+    let mut result =
+        extract_core(&working_path, storage_item_dir, engines, plain, start_page, use_cache).await?;
+    result.completeness.total_pages = total;
+    if let Some(note) = window_note {
+        result.completeness.notes.push(note);
+    }
+    Ok(result)
+}
+
+/// The route stack over a single (already window-sliced) working file.
+/// `start_page` is the true document page number of the working file's first
+/// page (1 for whole-document); `use_cache` gates the `.zotero-ft-cache`
+/// read/write to whole-document requests only.
+async fn extract_core(
+    pdf_path: &Path,
+    storage_item_dir: &Path,
+    engines: &PdfEngines,
+    plain: bool,
+    start_page: u32,
+    use_cache: bool,
 ) -> Result<PdfTextResult> {
     // 0. Layout-aware primary route (Docling), when configured. Tried
     //    ahead of the whole flat-text chain — including the Zotero cache,
@@ -1075,7 +1316,7 @@ pub async fn extract(
                 None => (pdf_path, PdfTextSource::Docling),
             };
 
-            match docling.extract_markdown(convert_path).await {
+            match docling.extract_markdown(convert_path, start_page).await {
                 Ok(extraction) if !meets_text_floor(&extraction.markdown) => {
                     tracing::warn!(
                         path = %pdf_path.display(),
@@ -1091,10 +1332,11 @@ pub async fn extract(
                         Vec::new(),
                     );
                     if ocr_temp.is_some() {
-                        // The pre-step ran because the whole document
-                        // lacked a text layer, so every page in the result
-                        // was recovered by OCR.
-                        completeness.ocr_pages = (1..=completeness.pages).collect();
+                        // The pre-step ran because the working file lacked a
+                        // text layer, so every page in the result was
+                        // recovered by OCR — numbered from the window start.
+                        completeness.ocr_pages =
+                            (start_page..start_page + completeness.pages).collect();
                     }
                     if let Some(note) = ocr_note {
                         // A scan we could not OCR: never claim completeness.
@@ -1129,9 +1371,10 @@ pub async fn extract(
 
     // 1. Cache hit — only when the cached text clears the minimum floor.
     //    An empty/near-empty cache (e.g. Zotero's own failed extraction)
-    //    must never be returned as success.
+    //    must never be returned as success. Skipped for windowed requests:
+    //    the cache holds the whole-document text, not this window.
     let cache = storage_item_dir.join(".zotero-ft-cache");
-    if cache.exists() {
+    if use_cache && cache.exists() {
         let text = tokio::fs::read_to_string(&cache).await?;
         if meets_text_floor(&text) {
             let n = text.chars().count();
@@ -1153,8 +1396,9 @@ pub async fn extract(
     // 2+3. Flat-text chain (pdf-extract → pdftotext) on the original file.
     let chain = flat_chain(pdf_path, engines).await;
     if let FlatChainOutcome::Extracted { text, source } = chain {
-        if source == PdfTextSource::PdftotextFallback {
-            // Cache write (best-effort).
+        if use_cache && source == PdfTextSource::PdftotextFallback {
+            // Cache write (best-effort). Only for whole-document runs — a
+            // window's partial text must never overwrite the full cache.
             if let Err(e) = write_cache_atomic(&cache, &text).await {
                 tracing::warn!(
                     path = %cache.display(),
@@ -1544,7 +1788,7 @@ mod assembly_tests {
             "Page one.{s}Page two.{s}Page three.",
             s = DOCLING_PAGE_BREAK_SENTINEL
         );
-        let out = assemble_page_anchors(&md, DOCLING_PAGE_BREAK_SENTINEL);
+        let out = assemble_page_anchors(&md, DOCLING_PAGE_BREAK_SENTINEL, 1);
         assert_eq!(
             out,
             "--- p.1 ---\n\nPage one.\n\n--- p.2 ---\n\nPage two.\n\n--- p.3 ---\n\nPage three.\n"
@@ -1552,8 +1796,23 @@ mod assembly_tests {
     }
 
     #[test]
+    fn windowed_anchors_carry_true_document_page_numbers() {
+        // A window sliced to start at page 5 must number its anchors 5,6,7 —
+        // not 1,2,3 — so downstream page references stay correct.
+        let md = format!(
+            "Page five.{s}Page six.{s}Page seven.",
+            s = DOCLING_PAGE_BREAK_SENTINEL
+        );
+        let out = assemble_page_anchors(&md, DOCLING_PAGE_BREAK_SENTINEL, 5);
+        assert_eq!(
+            out,
+            "--- p.5 ---\n\nPage five.\n\n--- p.6 ---\n\nPage six.\n\n--- p.7 ---\n\nPage seven.\n"
+        );
+    }
+
+    #[test]
     fn markdown_without_sentinel_gets_single_anchor() {
-        let out = assemble_page_anchors("Only page.", DOCLING_PAGE_BREAK_SENTINEL);
+        let out = assemble_page_anchors("Only page.", DOCLING_PAGE_BREAK_SENTINEL, 1);
         assert_eq!(out, "--- p.1 ---\n\nOnly page.\n");
     }
 
@@ -1563,7 +1822,7 @@ mod assembly_tests {
             "First page prose.{}Second page with a formula. {}",
             DOCLING_PAGE_BREAK_SENTINEL, FORMULA_NOT_DECODED_MARKER
         );
-        let out = assemble_page_anchors(&md, DOCLING_PAGE_BREAK_SENTINEL);
+        let out = assemble_page_anchors(&md, DOCLING_PAGE_BREAK_SENTINEL, 1);
         let c = Completeness::from_page_anchored_markdown(
             &out,
             PdfTextSource::Docling,
@@ -1782,6 +2041,7 @@ mod orchestrator_tests {
             ocrmypdf: None,
             primary,
             fallback,
+            whole_document_max_pages: 50,
         }
     }
 
@@ -2007,6 +2267,7 @@ mod orchestrator_tests {
             ocrmypdf: None,
             primary: Arc::new(PdfExtractEngine),
             fallback: FallbackState::Disabled,
+            whole_document_max_pages: 50,
         };
         let err = extract(&fixture("scanned.pdf"), dir.path(), &engines, false)
             .await
@@ -2037,6 +2298,7 @@ mod orchestrator_tests {
             ocrmypdf: None,
             primary,
             fallback,
+            whole_document_max_pages: 50,
         }
     }
 
@@ -2323,6 +2585,139 @@ mod orchestrator_tests {
             .join(name)
     }
 
+    // --- Total page count, slicing, windowing, and the large-doc guard ---
+
+    #[tokio::test]
+    async fn total_page_count_reports_document_length() {
+        // multipage.pdf is a genuine three-page document.
+        assert_eq!(total_page_count(&fixture("multipage.pdf")).await, 3);
+    }
+
+    #[tokio::test]
+    async fn total_page_count_is_zero_for_unparseable_pdf() {
+        let dir = TempDir::new().unwrap();
+        let p = dir.path().join("junk.pdf");
+        std::fs::write(&p, b"not a pdf").unwrap();
+        // lopdf and pdfinfo both fail: unknown count is reported as 0, not a panic.
+        assert_eq!(total_page_count(&p).await, 0);
+    }
+
+    #[tokio::test]
+    async fn slice_pages_keeps_only_the_requested_window() {
+        // Slice the middle page of the three-page document; the slice is a
+        // one-page PDF and the original is untouched.
+        let src = fixture("multipage.pdf");
+        let before = std::fs::read(&src).unwrap();
+        let slice = slice_pages(&src, 2, 2, 3).await.expect("slice succeeds");
+        assert_eq!(
+            total_page_count(slice.path()).await,
+            1,
+            "a 2..=2 window of a 3-page doc must be a single page"
+        );
+        assert_eq!(
+            std::fs::read(&src).unwrap(),
+            before,
+            "slicing must not mutate the original file"
+        );
+    }
+
+    fn engines_with_threshold(
+        primary: Arc<dyn PdfEngine>,
+        fallback: FallbackState,
+        whole_document_max_pages: u32,
+    ) -> PdfEngines {
+        PdfEngines {
+            docling: None,
+            ocrmypdf: None,
+            primary,
+            fallback,
+            whole_document_max_pages,
+        }
+    }
+
+    #[tokio::test]
+    async fn large_whole_document_request_is_refused_with_the_windowing_remedy() {
+        // A whole-document request over a doc past the page ceiling must be a
+        // loud PdfDocumentTooLarge — never a silent timeout or empty success.
+        let engines = engines_with_threshold(
+            StubEngine::never(), // guard fires before any engine is touched
+            FallbackState::Disabled,
+            2,
+        );
+        let dir = TempDir::new().unwrap();
+        let err = extract(&fixture("multipage.pdf"), dir.path(), &engines, false)
+            .await
+            .expect_err("3-page doc over a 2-page ceiling must be refused");
+        match err {
+            Error::PdfDocumentTooLarge {
+                pages, threshold, ..
+            } => {
+                assert_eq!(pages, 3);
+                assert_eq!(threshold, 2);
+            }
+            other => panic!("expected PdfDocumentTooLarge, got {other:?}"),
+        }
+        assert!(
+            err_names_windows(&engines, &fixture("multipage.pdf"), dir.path()).await,
+            "the error message must direct the caller to page windows"
+        );
+    }
+
+    async fn err_names_windows(engines: &PdfEngines, pdf: &Path, dir: &Path) -> bool {
+        extract(pdf, dir, engines, false)
+            .await
+            .err()
+            .map(|e| {
+                let m = e.to_string();
+                m.contains("window") && m.contains("page range")
+            })
+            .unwrap_or(false)
+    }
+
+    #[tokio::test]
+    async fn windowed_request_bypasses_the_guard_and_reports_total_pages() {
+        // The same over-ceiling document is readable via a window: the guard
+        // is window-aware, and total_pages reflects the whole document.
+        let engines = engines_with_threshold(
+            StubEngine::ok("page one body text well over the floor"),
+            FallbackState::Disabled,
+            2,
+        );
+        let dir = TempDir::new().unwrap();
+        let r = extract_windowed(
+            &fixture("multipage.pdf"),
+            dir.path(),
+            &engines,
+            false,
+            Some((1, 1)),
+        )
+        .await
+        .expect("a window of an over-ceiling doc must succeed");
+        assert_eq!(r.source, PdfTextSource::LiveExtract);
+        assert_eq!(
+            r.completeness.total_pages, 3,
+            "total_pages describes the whole document, not the window"
+        );
+        assert!(
+            r.completeness.notes.iter().any(|n| n.contains("page window")),
+            "a windowed result must note that it describes only the window"
+        );
+    }
+
+    #[tokio::test]
+    async fn whole_document_result_reports_total_pages() {
+        let engines = engines_with_threshold(
+            StubEngine::ok("some real extracted body text over the floor"),
+            FallbackState::Disabled,
+            50,
+        );
+        let dir = TempDir::new().unwrap();
+        let r = extract(&fixture("multipage.pdf"), dir.path(), &engines, false)
+            .await
+            .expect("whole-document extraction under the ceiling succeeds");
+        assert_eq!(r.completeness.total_pages, 3);
+    }
+
     #[tokio::test]
     async fn probe_reports_absent_for_scanned_fixture() {
         assert!(
@@ -2380,6 +2775,7 @@ mod orchestrator_tests {
             ocrmypdf,
             primary: StubEngine::never(),
             fallback: FallbackState::Disabled,
+            whole_document_max_pages: 50,
         }
     }
 

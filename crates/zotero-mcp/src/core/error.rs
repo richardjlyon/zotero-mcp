@@ -97,6 +97,20 @@ pub enum Error {
     )]
     PdfNothingExtractable { path: String, detail: String },
 
+    #[error(
+        "pdf {path} has {pages} pages, over the {threshold}-page whole-document \
+         extraction limit. Extracting the whole document at once (OCR + layout \
+         conversion) would exceed the time budget and the response size. Remedy: \
+         request page windows instead — call the extraction tool with a page \
+         range (e.g. from_page/to_page) and walk the {pages} pages a window at a \
+         time; each result reports the total page count so you know when you are done."
+    )]
+    PdfDocumentTooLarge {
+        path: String,
+        pages: u32,
+        threshold: u32,
+    },
+
     #[error("html extraction failed: {0}")]
     Html(String),
 

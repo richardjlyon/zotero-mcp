@@ -162,6 +162,17 @@ If every route fails or yields sub-floor text, the tools return a loud
 error naming the remedy — never empty text as success. Passing
 `plain=true` skips Docling entirely and forces the old flat-text output.
 
+**Page windows (large & scanned PDFs).** `get_pdf_text` accepts optional
+`from_page` / `to_page` (1-indexed, inclusive) to extract a bounded page
+window. The requested pages are sliced locally and only that slice is
+OCR'd and converted, so per-call work is bounded by the window, not the
+document — a 400-page scan is readable in full by walking windows. Every
+result reports `completeness.total_pages` (the whole-document count,
+independent of the window) so a caller knows how many windows remain. A
+*whole-document* request on a PDF larger than `pdf_whole_document_max_pages`
+(default 50) is refused with a loud error directing you to page windows,
+rather than attempting a doomed multi-minute OCR/convert.
+
 Every result carries a **machine-readable completeness report**
 (`completeness`): the engine used, page count, per-page character
 counts, and the page locations of undecoded formulas, untranscribed

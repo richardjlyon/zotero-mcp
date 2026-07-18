@@ -10,8 +10,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 use zotero_mcp::core::config::ZoteroConfig;
 use zotero_mcp::core::pdf::{
-    extract, truncate_to_first_pages, Completeness, DoclingEngine, PdfEngines, PdfFormat,
-    PdfTextSource,
+    extract, extract_windowed, truncate_to_first_pages, Completeness, DoclingEngine, PdfEngines,
+    PdfFormat, PdfTextSource,
 };
 
 /// Endpoint from `DOCLING_URL`, or `None` to signal "skip on this host".
@@ -142,7 +142,7 @@ async fn docling_engine_extracts_hello_pdf_live() {
     }
 
     let ext = eng
-        .extract_markdown(&hello_pdf())
+        .extract_markdown(&hello_pdf(), 1)
         .await
         .expect("live docling extraction succeeded");
     let md = &ext.markdown;
@@ -183,6 +183,94 @@ fn fixture(name: &str) -> PathBuf {
         "{name} fixture missing — run tests/fixtures/gen_pdfs.py"
     );
     fixture
+}
+
+/// Walk a document a page-window at a time and assert the windows together
+/// cover every page, in order, with a consistent whole-document page count —
+/// the property that makes a large document (e.g. a 414-page scan) readable
+/// in full through the MCP. Offline: the flat-text primary (`pdf-extract`)
+/// reads the text fixture, so no Docling/OCR service is required. Docling is
+/// forced off so the assertion does not depend on `DOCLING_URL`.
+#[tokio::test]
+async fn window_walk_covers_the_whole_document_with_a_stable_total() {
+    let engines = PdfEngines::build(&ZoteroConfig::default()).with_docling(None);
+    let doc = fixture("multipage.pdf");
+    let storage_item_dir = tempfile::TempDir::new().unwrap();
+
+    // Each page carries a distinctive sentence (see gen_pdfs.py::make_multipage).
+    let markers = ["albatross", "badger", "capybara"];
+    for (i, marker) in markers.iter().enumerate() {
+        let page = (i + 1) as u32;
+        let r = extract_windowed(
+            &doc,
+            storage_item_dir.path(),
+            &engines,
+            false,
+            Some((page, page)),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("window {page}..={page} extracts: {e}"));
+
+        assert_eq!(
+            r.completeness.total_pages, 3,
+            "every window must report the same whole-document page count"
+        );
+        assert!(
+            r.text.to_lowercase().contains(marker),
+            "window {page} must contain page {page}'s text ({marker}); got: {:?}",
+            r.text
+        );
+        // No spillover from adjacent pages — the window is exactly its page.
+        for (j, other) in markers.iter().enumerate() {
+            if j != i {
+                assert!(
+                    !r.text.to_lowercase().contains(other),
+                    "window {page} must not contain page {}'s text ({other})",
+                    j + 1
+                );
+            }
+        }
+    }
+}
+
+/// Live end-to-end windowed layout extraction: a mid-document window is
+/// sliced locally and sent to the real Docling service, and the returned
+/// markdown must carry the document's TRUE page anchors (`--- p.2 ---`,
+/// `--- p.3 ---` — not renumbered from 1), contain only those pages' text,
+/// and report the whole-document page count with window-scoped page fields.
+#[tokio::test]
+async fn windowed_docling_anchors_carry_true_page_numbers_live() {
+    let Some(engines) = live_engines("live windowed-anchors test").await else {
+        return;
+    };
+    let storage_item_dir = tempfile::TempDir::new().unwrap();
+    let r = extract_windowed(
+        &fixture("multipage.pdf"),
+        storage_item_dir.path(),
+        &engines,
+        false,
+        Some((2, 3)),
+    )
+    .await
+    .expect("live windowed Docling extraction of pages 2..=3 succeeded");
+
+    assert_eq!(r.source, PdfTextSource::Docling);
+    assert_eq!(r.format, PdfFormat::Markdown);
+    assert!(r.page_anchors);
+    assert!(
+        r.text.contains("--- p.2 ---") && r.text.contains("--- p.3 ---"),
+        "windowed anchors must be the true page numbers 2 and 3; got: {:?}",
+        r.text
+    );
+    assert!(
+        !r.text.contains("--- p.1 ---"),
+        "page 1 is outside the window and must not appear"
+    );
+    let lower = r.text.to_lowercase();
+    assert!(lower.contains("badger") && lower.contains("capybara"), "got: {:?}", r.text);
+    assert!(!lower.contains("albatross"), "page-1 text must not leak into the window");
+    assert_eq!(r.completeness.total_pages, 3, "total_pages is the whole document");
+    assert_eq!(r.completeness.pages, 2, "pages describes only the 2-page window");
 }
 
 /// Build the engine bundle from `DOCLING_URL` and skip loudly when the
