@@ -1,10 +1,22 @@
-> **Design deviation (D2/D3):** page windows are sliced **locally with `lopdf`**
-> (`delete_pages`) into a temp PDF, and that slice is sent to the existing route
-> stack (Docling's own OCR handles scans). This resolves the docling `page_range`
-> Open Question entirely (no dependency on the service's field shape) and makes the
-> OCR pre-step / flat-chain rescue window-scoped for free — the slice *is* the
-> pre-split, so no `qpdf`/`pdfseparate` is needed. Tasks 3.1/3.4/4.1/4.2 are
+> **Design deviation (D2/D3):** page windows are sliced **locally** into a temp PDF
+> and sent to the existing route stack (Docling's own OCR handles scans). This
+> resolves the docling `page_range` Open Question entirely (no dependency on the
+> service's field shape) and makes the OCR pre-step / flat-chain rescue
+> window-scoped for free — the slice *is* the pre-split. Tasks 3.1/3.4/4.1/4.2 are
 > satisfied by this single mechanism.
+>
+> **Slicer choice (perf, learned in validation):** `lopdf` slicing is
+> catastrophically slow on large files — `load` 135s + `delete_pages` 388s on the
+> 414-page fixture (an 11-minute window). Slicing therefore uses **Poppler
+> `pdfseparate` + `pdfunite`** (~1.5s for the same window; `pdfinfo` for the page
+> count), with `lopdf` kept only as a pure-Rust fallback for hosts without Poppler.
+> A single large-scan window now takes ~7s; the full 414-page walk ~4 min.
+>
+> **Delivery (§9):** shipped a `zotero-mcp pdf-text` CLI subcommand (same engine as
+> the MCP tool) so the Pi harness — which has no MCP client by design — can consume
+> it. A CLI has no response-size ceiling, so it walks large scans internally and
+> streams the whole document to stdout in one call. Paired with the Pi skill
+> `zotero-pdf-scan`.
 
 ## 1. Total page count (D4)
 
@@ -73,3 +85,18 @@
 - [x] 8.1 `cargo test` green (154 lib + integration incl. live Docling; external-engine tests
   skip loudly when absent). `cargo clippy` adds **zero** new warnings vs baseline.
   README + CHANGELOG + tool descriptions updated. Version bump/spec archive deferred to release.
+
+## 9. CLI + Pi delivery (added — Pi has no MCP by design)
+
+- [x] 9.1 `zotero-mcp pdf-text <key> [--from --to] [--plain] [--window-size]` subcommand:
+  reuses `get_pdf_text`; whole-doc auto-walks large scans to stdout (no response-size cap);
+  clean text on stdout, route/pages/total/complete diagnostics on stderr.
+- [x] 9.2 Poppler-primary slicer + `pdfinfo` page count (perf fix above). Live-validated on
+  `6RT3NJQ6`: window 5..=7 in ~7s; auto-walk streams windows 1..=3, 4..=6, … with correct
+  anchors and per-window route/completeness.
+- [x] 9.3 Pi skill `~/.pi/agent/skills/zotero-pdf-scan/SKILL.md` (validates via pi's loader):
+  documents the CLI + the library-wide image-only scan procedure; flags the `zref` arbiter
+  rewire as a deliberate follow-up.
+- [ ] 9.4 FOLLOW-UP (needs sign-off): install the rebuilt binary (`cargo install --path`) and
+  point `zref cmd_pdf_text`'s scanned/large path at `zotero-mcp pdf-text`. Not done
+  autonomously — it changes the fact-check arbiter and needs a reinstall.

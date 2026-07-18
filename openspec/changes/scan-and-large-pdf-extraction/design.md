@@ -117,8 +117,21 @@ tools changes, not the Plan-8 transport stack.
 
 ## Open Questions
 
-- Exact `page_range` field name/shape the deployed docling-serve expects (`page_range`
-  vs `page_start`/`page_end`) — confirm against the live service during implementation and
-  pin in a live test.
+- Exact `page_range` field name/shape the deployed docling-serve expects — MOOT (see As-built).
 - Default window size guidance for callers (the tool description) — likely ~20 pages;
   confirm against typical response-size limits.
+
+## As-built (supersedes D2/D4 above)
+
+- **Windowing does NOT use docling `page_range`.** The window is sliced to a temp PDF
+  locally and sent to the normal route stack, so the service's field shape is irrelevant
+  and the OCR pre-step / flat-chain rescue become window-scoped for free.
+- **Slicer is Poppler `pdfseparate` + `pdfunite`, not `lopdf`.** Validation exposed `lopdf`
+  as catastrophically slow on large files (`load` 135s + `delete_pages` 388s on the 414-page
+  fixture — an 11-minute window). Poppler slices the same window in ~1.5s. `pdfinfo` is the
+  primary page-count source (near-instant); `lopdf` is a pure-Rust fallback for hosts without
+  Poppler (which is already a required dependency).
+- **Delivery: a `zotero-mcp pdf-text` CLI subcommand** (same engine as the MCP tool). The Pi
+  harness has no MCP client by design (Pi excludes MCP), so a CLI is the idiomatic surface; it
+  also has no response-size ceiling, so it walks large scans internally and streams the whole
+  document to stdout. Consumed by the `zotero-pdf-scan` Pi skill.

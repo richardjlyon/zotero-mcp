@@ -902,26 +902,36 @@ async fn run_ocrmypdf(binary: &Path, pdf_path: &Path) -> std::result::Result<Tem
     Ok(guard)
 }
 
+/// A unique temp path in the system temp dir with the given extension.
+fn temp_path(tag: &str, ext: &str) -> PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!(
+        "zotero-mcp-{}-{}-{}-{}.{}",
+        tag,
+        std::process::id(),
+        nanos,
+        seq,
+        ext
+    ))
+}
+
 /// The document's true total page count, independent of any window and of
-/// the extraction engines. `lopdf` (pure Rust) first; Poppler `pdfinfo`
-/// fallback when `lopdf` cannot parse the file; `0` when neither can — the
-/// orchestrator then records the unknown count in a note rather than
-/// failing. Runs the blocking `lopdf` parse off the async runtime.
+/// the extraction engines. Poppler `pdfinfo` first — it reads only the
+/// structure and is near-instant even on a 400-page scan; `lopdf` (pure
+/// Rust) is a slow fallback for hosts without Poppler; `0` when neither can,
+/// which the orchestrator records as an unknown count rather than failing.
+///
+/// The order matters: `lopdf::Document::load` fully parses the file and takes
+/// *minutes* on a large image-heavy PDF, so it must never be the primary path.
 async fn total_page_count(path: &Path) -> u32 {
-    let p = path.to_path_buf();
-    let via_lopdf = tokio::task::spawn_blocking(move || {
-        lopdf::Document::load(&p)
-            .ok()
-            .map(|doc| doc.get_pages().len() as u32)
-            .filter(|n| *n > 0)
-    })
-    .await
-    .ok()
-    .flatten();
-    if let Some(n) = via_lopdf {
-        return n;
-    }
-    // pdfinfo fallback (Poppler): `Pages:            N`.
+    // pdfinfo (Poppler): `Pages:            N`.
     if let Ok(bin) = which::which("pdfinfo") {
         if let Ok(out) = tokio::process::Command::new(bin)
             .arg("--")
@@ -942,38 +952,127 @@ async fn total_page_count(path: &Path) -> u32 {
             }
         }
     }
-    0
+    // Pure-Rust fallback (slow on large files; only when Poppler is absent).
+    let p = path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        lopdf::Document::load(&p)
+            .ok()
+            .map(|doc| doc.get_pages().len() as u32)
+            .filter(|n| *n > 0)
+    })
+    .await
+    .ok()
+    .flatten()
+    .unwrap_or(0)
 }
 
 /// Slice pages `from..=to` (1-indexed, inclusive; assumed already clamped to
-/// `1..=total`) of `pdf_path` into a fresh temp PDF via `lopdf`, returning a
-/// guard that deletes it on drop. The original file is only ever read. Pure
-/// structural surgery — no rendering, no OCR — so it stays cheap even for a
-/// window of a very large scan. Runs off the async runtime.
+/// `1..=total`) of `pdf_path` into a fresh temp PDF, returning a guard that
+/// deletes it on drop. The original file is only ever read.
+///
+/// Poppler `pdfseparate` + `pdfunite` is the primary path — lossless
+/// structural surgery in ~1s even on a 400-page scan. `lopdf` is a pure-Rust
+/// fallback for hosts without Poppler, but it parses the whole file and is
+/// *minutes* slow on large PDFs, so it is a last resort, not the default.
 async fn slice_pages(
     pdf_path: &Path,
     from: u32,
     to: u32,
     total: u32,
 ) -> std::result::Result<TempPdf, EngineError> {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let out = std::env::temp_dir().join(format!(
-        "zotero-mcp-slice-{}-{}.pdf",
-        std::process::id(),
-        nanos
-    ));
+    if let (Ok(sep), Ok(unite)) = (which::which("pdfseparate"), which::which("pdfunite")) {
+        match slice_pages_poppler(&sep, &unite, pdf_path, from, to).await {
+            Ok(temp) => return Ok(temp),
+            Err(e) => tracing::warn!(
+                error = %e,
+                "pdfseparate/pdfunite slice failed; falling back to the slow lopdf slicer"
+            ),
+        }
+    }
+    slice_pages_lopdf(pdf_path, from, to, total).await
+}
+
+/// Poppler slice: `pdfseparate -f from -l to` writes one temp PDF per page,
+/// then (for a multi-page window) `pdfunite` merges them into one. The
+/// per-page files are cleaned up before returning; the merged window is the
+/// returned guard.
+async fn slice_pages_poppler(
+    pdfseparate: &Path,
+    pdfunite: &Path,
+    pdf_path: &Path,
+    from: u32,
+    to: u32,
+) -> std::result::Result<TempPdf, EngineError> {
+    let pattern = temp_path("sep", "%d.pdf");
+    let sep_status = tokio::process::Command::new(pdfseparate)
+        .arg("-f")
+        .arg(from.to_string())
+        .arg("-l")
+        .arg(to.to_string())
+        .arg("--")
+        .arg(pdf_path)
+        .arg(&pattern)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .await
+        .map_err(|e| EngineError::Failed(format!("failed to run pdfseparate: {e}")))?;
+    // The `%d` in the pattern expands to each page number.
+    let pat = pattern.to_string_lossy();
+    let per_page: Vec<PathBuf> = (from..=to)
+        .map(|n| PathBuf::from(pat.replacen("%d", &n.to_string(), 1)))
+        .collect();
+    let _page_guards: Vec<TempPdf> = per_page.iter().cloned().map(TempPdf).collect();
+    if !sep_status.status.success() || per_page.iter().any(|p| !p.exists()) {
+        let stderr = String::from_utf8_lossy(&sep_status.stderr);
+        return Err(EngineError::Failed(format!(
+            "pdfseparate produced no output for pages {from}..={to}: {}",
+            stderr.trim()
+        )));
+    }
+    let out = temp_path("slice", "pdf");
+    let guard = TempPdf(out.clone());
+    if per_page.len() == 1 {
+        // Single page: no merge needed, just move it into place.
+        tokio::fs::rename(&per_page[0], &out)
+            .await
+            .map_err(|e| EngineError::Failed(format!("failed to place single-page slice: {e}")))?;
+        return Ok(guard);
+    }
+    let unite = tokio::process::Command::new(pdfunite)
+        .arg("--")
+        .args(&per_page)
+        .arg(&out)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .await
+        .map_err(|e| EngineError::Failed(format!("failed to run pdfunite: {e}")))?;
+    if !unite.status.success() || !out.exists() {
+        let stderr = String::from_utf8_lossy(&unite.stderr);
+        return Err(EngineError::Failed(format!(
+            "pdfunite failed to merge window {from}..={to}: {}",
+            stderr.trim()
+        )));
+    }
+    Ok(guard)
+}
+
+/// Pure-Rust `lopdf` slice: delete every page outside the window, prune, save.
+/// Correct but slow on large files (`lopdf` fully parses the document), so it
+/// is only reached when Poppler is unavailable. Runs off the async runtime.
+async fn slice_pages_lopdf(
+    pdf_path: &Path,
+    from: u32,
+    to: u32,
+    total: u32,
+) -> std::result::Result<TempPdf, EngineError> {
+    let out = temp_path("slice", "pdf");
     let guard = TempPdf(out.clone());
     let src = pdf_path.to_path_buf();
     let dst = out.clone();
     let res = tokio::task::spawn_blocking(move || -> std::result::Result<(), String> {
         let mut doc = lopdf::Document::load(&src).map_err(|e| e.to_string())?;
-        // Delete every page outside the window in one call — delete_pages
-        // resolves page numbers against the original numbering, so passing
-        // all out-of-window pages together is correct.
+        // delete_pages resolves page numbers against the original numbering,
+        // so passing all out-of-window pages together in one call is correct.
         let to_delete: Vec<u32> = (1..from).chain((to + 1)..=total).collect();
         if !to_delete.is_empty() {
             doc.delete_pages(&to_delete);
