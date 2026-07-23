@@ -9,7 +9,7 @@
 - **MCP tool annotations** (`read_only_hint` / `destructive_hint` / `idempotent_hint` / `open_world_hint`) are mandatory on new tools — see the existing 34 for examples.
 - **Output shapes** prefer typed `Json<T>` with derived `JsonSchema` over loose `CallToolResult` text. Slice G is migrating the residual.
 - **Releases** are tagged `v0.x.0`. The crate published to crates.io is `zotero-mcp`.
-- **Mirror tax.** The Plan-8 transport stack (`bearer.rs`, `oauth.rs`, `oauth/token_store.rs`, `http_transport.rs`, `setup.rs`) is duplicated into the sister repo `things-mcp` (`/Users/rjl/Code/mcp-things`) by deliberate choice — no shared library extraction (pinned principle). Any fix to one of those modules MUST be cherry-picked to the sister repo in the same session, or the repos silently drift.
+- **Mirror tax.** The Plan-8 transport stack (`bearer.rs`, `oauth.rs`, `oauth/token_store.rs`, `http_transport.rs`, `setup.rs`) is duplicated into the sister repo `things-mcp` (`mcp-things` — path varies by machine; on the VM it will be `/vault/code/mcp-things` once migrated) by deliberate choice — no shared library extraction (pinned principle). Any fix to one of those modules MUST be cherry-picked to the sister repo in the same session, or the repos silently drift.
 
 ## Layout
 
@@ -24,16 +24,14 @@
 | `docs/CLAUDE_CODE_SETUP.md` | How to wire the server into Claude Code (stdio) |
 | `docs/CLAUDE_COWORK_SETUP.md` | How to wire the server into Cowork (streamable-HTTP via Tailscale Funnel) |
 
-## Cowork integration (Richard's machine)
+## Project brain (the vault)
 
-This repo also has a Cowork project at `/Users/rjl/Resilio/claude-cowork/project/zotero-connector/`. When working from a Cowork-aware Claude session, read `claude.md` and `memory.md` in that folder for cross-project context, current activity, and the live offload-spec backlog originating in skill-side experience. Update `memory.md` after significant decisions, releases, or status changes.
-
-The Cowork project also stewards the **two outstanding offload specs** that affect this repo's tool surface:
-
-- `find_duplicates` — `claude-cowork/project/memory-system/zotero-find-duplicates.spec.md`
-- `lookup_*` resilience — `claude-cowork/project/memory-system/zotero-lookup-resilience.spec.md`
-
-Both originated from manual eval passes of the `adding-references` skill against this server. They are the next functional additions in the queue once the current dependency-upgrade slices stabilise.
+Project context — architecture decisions, release state, the offload-spec backlog, open
+questions — lives in the second-brain vault: `/vault/brain/Projects/Zotero MCP.md` (hub).
+Load it with `/obsidian-projects zotero`; save state back at session end with
+`/obsidian-log` or `/obsidian-save`. (Migrated 2026-07-23 from the old Cowork workspace,
+now archived. Note: the VM reads a read-only Resilio mirror of the Mac's ~/Zotero data;
+writes go via api.zotero.org — file attachments cannot use the local-sync path here.)
 
 ## Sister repos
 
