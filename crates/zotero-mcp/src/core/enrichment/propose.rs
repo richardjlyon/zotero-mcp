@@ -104,6 +104,11 @@ pub async fn propose_metadata_update(
         inp.storage_dir,
         1,
         inp.engines,
+        // Metadata heuristics want fast, flat first-page text: the
+        // Docling route would return page-anchored markdown (whose
+        // `--- p.1 ---`/`#`/`|` markers break the line-based title/author
+        // signals) and pay a full-document remote conversion to do it.
+        true,
     )
     .await
     {

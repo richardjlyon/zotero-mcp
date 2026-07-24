@@ -23,7 +23,7 @@ path = "src/main.rs"
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
-reqwest.workspace = true
+reqwest = { workspace = true, features = ["multipart"] }
 rmcp.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -47,6 +47,7 @@ toml.workspace = true
 # Merged from former zotero-core crate (the low-level Zotero readers/writers,
 # enrichment HTTP clients, citation rendering, PDF/webpage extraction).
 deadpool-sqlite.workspace = true
+lopdf.workspace = true
 miette.workspace = true
 pdf-extract.workspace = true
 readability.workspace = true

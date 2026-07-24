@@ -3,7 +3,7 @@ use crate::core::types::{EnrichmentProposal, Item};
 use crate::core::web::{RefetchResult, WebContentResult};
 use crate::state::AppState;
 use crate::tools::attachments::{
-    self as att, FirstPagesArgs, ItemKeyArgs as AttachItemKey, RefetchArgs, WebArgs,
+    self as att, FirstPagesArgs, ItemKeyArgs as AttachItemKey, PdfTextArgs, RefetchArgs, WebArgs,
 };
 use crate::tools::citations::{self as cit, FormatBibArgs, FormatCitationArgs};
 use crate::tools::enrichment::{
@@ -127,19 +127,19 @@ impl ZoteroServer {
     }
 
     #[tool(
-        description = "Read full extracted PDF text for an item. Resolution order: .zotero-ft-cache → in-process pdf-extract → pdftotext fallback (automatic, when Poppler is on PATH). The `source` field on the response identifies which engine succeeded (zotero_cache | live_extract | pdftotext_fallback). Callers do not need to handle fallback manually — extraction is resilient to PDFs that trip pdf-extract.",
-        annotations(read_only_hint = true, open_world_hint = false)
+        description = "Read full extracted PDF text for an item. Primary route: the layout-aware Docling service — markdown output with real tables, `--- p.N ---` page anchors, and formulas decoded to LaTeX; scanned (image-only) PDFs get an ocrmypdf OCR pre-step. Falls back to the flat-text chain (.zotero-ft-cache → pdf-extract → pdftotext) when the service is unreachable; `source` identifies which engine produced the text. Every result carries a machine-readable `completeness` report (pages, per-page chars, undecoded formulas, untranscribed images, OCR'd pages, low-text pages): trust presence in the text, but treat absence on pages with declared drops as unknown — never as 'not in the document'. Set `plain=true` to force the old flat-text output. Fails loudly when no route can extract text; never returns empty text as success.",
+        annotations(read_only_hint = true, open_world_hint = true)
     )]
     pub async fn get_pdf_text(
         &self,
-        Parameters(args): Parameters<AttachItemKey>,
+        Parameters(args): Parameters<PdfTextArgs>,
     ) -> Result<Json<PdfTextResult>, McpError> {
         att::get_pdf_text_t(&self.state, args).await
     }
 
     #[tool(
-        description = "Read the first N pages of a PDF (default 2). Useful for cheap context grabs. Uses the same resilient extraction chain as get_pdf_text (cache → pdf-extract → pdftotext fallback).",
-        annotations(read_only_hint = true, open_world_hint = false)
+        description = "Read the first N pages of a PDF (default 2). Useful for cheap context grabs. Same extraction contract as get_pdf_text: layout-aware markdown by default (Docling route, completeness report, OCR pre-step for scans), `plain=true` for the old flat-text output, loud failure when nothing extracts.",
+        annotations(read_only_hint = true, open_world_hint = true)
     )]
     pub async fn get_pdf_first_pages(
         &self,
@@ -577,6 +577,18 @@ mod tests {
             .annotations
             .expect("add_tags should carry annotations");
         assert_eq!(ann.idempotent_hint, Some(true));
+
+        // Both PDF tools now reach the external Docling service.
+        let ann = ZoteroServer::get_pdf_text_tool_attr()
+            .annotations
+            .expect("get_pdf_text should carry annotations");
+        assert_eq!(ann.read_only_hint, Some(true));
+        assert_eq!(ann.open_world_hint, Some(true));
+
+        let ann = ZoteroServer::get_pdf_first_pages_tool_attr()
+            .annotations
+            .expect("get_pdf_first_pages should carry annotations");
+        assert_eq!(ann.open_world_hint, Some(true));
     }
 
     #[test]

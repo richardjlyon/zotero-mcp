@@ -1,0 +1,26 @@
+schema: spec-driven
+
+context: |
+  Project: zotero-mcp — a Rust MCP server over a local Zotero library (released v0.3.2).
+  Workspace crate: crates/zotero-mcp. Edition 2021. Tests are integration-style under
+  crates/zotero-mcp/tests/ with fixtures; `cargo test` is the gate.
+
+  PDF extraction today (crates/zotero-mcp/src/core/pdf.rs, tool `get_pdf_text`):
+  a flat-text chain — `.zotero-ft-cache` -> in-process `pdf-extract` crate -> `pdftotext`
+  (Poppler) fallback. It returns plain text with a `source` label. It has NO layout
+  awareness: tables collapse to interleaved number-soup, equations and figures are lost,
+  there are no page anchors, and scanned/image-only PDFs yield nothing. Downstream LLM
+  ingestion (the Obsidian vault pipeline) treats this text as the "arbiter" a note is
+  fact-checked against — so extraction gaps become fabrication and false-deletion risks.
+
+  The wider system already runs a Docling extraction service (`docling-serve`,
+  quay.io/docling-project/docling-serve-cu128) on a GPU host reachable over the tailnet
+  at http://100.79.12.8:5001 — POST /v1/convert/file, JSON .document.md_content, with a
+  `md_page_break_placeholder` option and (not yet enabled) `do_formula_enrichment`.
+  ocrmypdf + tesseract are available for OCR. This change should make zotero-mcp's own
+  extraction complete and trustworthy for LLM ingestion, not push that job to callers.
+
+  Conventions: MIT/Apache-2.0; keep the existing tool contracts (verbs/args) stable where
+  possible; every behavioural requirement ships with an integration test + fixture.
+
+# Per-artifact rules (optional)

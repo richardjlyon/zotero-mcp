@@ -104,6 +104,23 @@ You also need:
   sudo apt install poppler-utils  # Debian/Ubuntu
   ```
 
+- **A [Docling](https://github.com/docling-project/docling-serve) service**
+  (optional, strongly recommended): enables the layout-aware primary
+  extraction route — markdown output with real tables, reading order,
+  page anchors, and equations decoded to LaTeX. Point `zotero-mcp` at it
+  with the `DOCLING_URL` environment variable or `docling_url` in
+  `config.toml`. Without it, extraction uses the flat-text chain only
+  (and says so in the completeness report).
+
+- **`ocrmypdf`** (optional): enables the OCR pre-step for scanned /
+  image-only PDFs on the Docling route. Without it, scanned PDFs are
+  not OCR'd and the gap is declared in the completeness report.
+
+  ```bash
+  brew install ocrmypdf           # macOS
+  sudo apt install ocrmypdf       # Debian/Ubuntu
+  ```
+
 ## How it works
 
 ### Reads vs writes (the two-faced HTTP client)
@@ -122,6 +139,63 @@ This split is forced by Zotero itself: the local server is read-only
 and returns `501 Not Implemented` on `PATCH`/`POST`. The trade-off is
 that without an API key you get full read access but writes are
 disabled.
+
+### PDF extraction: routes and the completeness contract
+
+`get_pdf_text` / `get_pdf_first_pages` share one extraction stack, tried
+in order:
+
+1. **Docling** (layout-aware primary route, when configured) — HTTP call
+   to a [docling-serve](https://github.com/docling-project/docling-serve)
+   instance with formula enrichment enabled. Output is markdown with real
+   tables, reading order, `--- p.N ---` page anchors, and equations
+   decoded to LaTeX. When the PDF has no usable text layer (a scan), an
+   **OCR pre-step** runs `ocrmypdf --skip-text` on a temp copy first —
+   the original file is never modified — and the source is labelled
+   `ocr_then_docling`.
+2. **`.zotero-ft-cache`** — Zotero's own flat-text extraction, kept as a
+   fast path when the Docling route is unavailable.
+3. **`pdf-extract`** — in-process pure-Rust extraction.
+4. **`pdftotext`** — Poppler subprocess fallback.
+
+If every route fails or yields sub-floor text, the tools return a loud
+error naming the remedy — never empty text as success. Passing
+`plain=true` skips Docling entirely and forces the old flat-text output.
+
+**Page windows (large & scanned PDFs).** `get_pdf_text` accepts optional
+`from_page` / `to_page` (1-indexed, inclusive) to extract a bounded page
+window. The requested pages are sliced locally and only that slice is
+OCR'd and converted, so per-call work is bounded by the window, not the
+document — a 400-page scan is readable in full by walking windows. Every
+result reports `completeness.total_pages` (the whole-document count,
+independent of the window) so a caller knows how many windows remain. A
+*whole-document* request on a PDF larger than `pdf_whole_document_max_pages`
+(default 50) is refused with a loud error directing you to page windows,
+rather than attempting a doomed multi-minute OCR/convert.
+
+Every result carries a **machine-readable completeness report**
+(`completeness`): the engine used, page count, per-page character
+counts, and the page locations of undecoded formulas, untranscribed
+figures/charts, OCR-recovered pages, and suspiciously low-text pages,
+plus a boolean `complete`. The contract for consumers (especially LLM
+pipelines fact-checking notes against this text):
+
+- **Presence is trustworthy** — text in the output really is in the
+  document.
+- **Absence is only trustworthy when `complete: true`.** Where the
+  report declares drops (`undecoded_formulas`, `untranscribed_images`,
+  a flat-text note), treat those regions as *unknown*, never as "not in
+  the document".
+- Flat-text engines (cache, `pdf-extract`, `pdftotext`) cannot detect
+  tables/formulas/images, so their results are always `complete: false`
+  with an explicit note — degraded extraction is a declared, queryable
+  state, not a silent one.
+
+The Docling endpoint is read from the `DOCLING_URL` environment
+variable, which takes precedence over `docling_url` in `config.toml`;
+when neither is set the route is disabled. On this project's home setup
+the service is a GPU box on the tailnet at `http://100.79.12.8:5001` —
+substitute your own docling-serve instance.
 
 ### Two transport modes
 
@@ -304,8 +378,8 @@ are paraphrased from each tool's `#[tool(description = …)]` declaration
 
 | Tool | What it does |
 |------|--------------|
-| `get_pdf_text` | Full extracted PDF text — `.zotero-ft-cache` → `pdf-extract` → `pdftotext` fallback; resilient by default |
-| `get_pdf_first_pages` | First N pages of a PDF (default 2) — same fallback chain, cheaper |
+| `get_pdf_text` | Full PDF text — layout-aware markdown via Docling by default (tables, `--- p.N ---` page anchors, LaTeX equations, OCR pre-step for scans) with a machine-readable completeness report; falls back to the flat-text chain (`.zotero-ft-cache` → `pdf-extract` → `pdftotext`) when the service is unreachable; `plain=true` forces the old flat output |
+| `get_pdf_first_pages` | First N pages of a PDF (default 2) — same extraction contract as `get_pdf_text`, cheaper |
 | `get_pdf_path` | Absolute filesystem path to an attachment (raw-bytes use cases; prefer `get_pdf_text` for text) |
 | `get_webpage_content` | Webpage content for an item via stored snapshot or live fetch (mode: `snapshot`/`live`/`auto`) |
 | `refetch_url` | Re-fetch a webpage item live, optionally saving a fresh HTML snapshot |
@@ -419,6 +493,25 @@ pdftotext_fallback = true
 # instead of PATH lookup. Useful for non-standard installs.
 # pdftotext_path = "/opt/homebrew/bin/pdftotext"
 
+# Base URL of the Docling conversion service (layout-aware primary
+# extraction route). The DOCLING_URL environment variable takes
+# precedence over this value. When neither is set, the Docling route is
+# disabled and extraction uses the flat-text chain only.
+# docling_url = "http://100.79.12.8:5001"
+
+# Wall-clock timeout for one Docling convert request, in seconds.
+# Formula enrichment on large PDFs is slow — keep this generous.
+docling_convert_timeout_secs = 300
+
+# Timeout for the Docling /health probe, in seconds.
+docling_health_timeout_secs = 5
+
+# Explicit path to the ocrmypdf binary used by the OCR pre-step for
+# scanned (image-only) PDFs. When set and the file exists, used instead
+# of PATH lookup. When ocrmypdf cannot be resolved at all, the OCR
+# pre-step is skipped and the gap is recorded in the completeness report.
+# ocrmypdf_path = "/opt/homebrew/bin/ocrmypdf"
+
 # attach_file storage mode. "imported_file" copies bytes into
 # <data_dir>/storage/<key>/<filename> — the same on-disk layout Zotero's
 # UI produces. Zotero desktop's sync engine then pushes the file to
@@ -481,10 +574,21 @@ retry. `update_item_fields` does this auto-detection internally;
 direct API users may need to handle it.
 
 **PDF text extraction returns empty / errors out**
-The PDF uses features the pure-Rust `pdf-extract` crate doesn't support.
-Install Poppler (`brew install poppler` / `sudo apt install poppler-utils`)
-so `zotero-mcp` can fall back to `pdftotext`. The fallback is automatic
-when `pdftotext` is on `PATH`. Confirm with `which pdftotext`.
+On the flat-text chain: the PDF uses features the pure-Rust `pdf-extract`
+crate doesn't support. Install Poppler (`brew install poppler` /
+`sudo apt install poppler-utils`) so `zotero-mcp` can fall back to
+`pdftotext`. The fallback is automatic when `pdftotext` is on `PATH`.
+Confirm with `which pdftotext`. For scanned (image-only) PDFs, install
+`ocrmypdf` and configure a Docling service (`DOCLING_URL` or
+`docling_url`) so the OCR pre-step can recover the text.
+
+**`get_pdf_text` reports `complete: false`**
+Not an error — the completeness report declaring a gap. Check
+`completeness.notes` and the drop vectors: a flat-text note means the
+Docling route wasn't reachable (check `DOCLING_URL` / `docling_url` and
+the service's `/health`); `undecoded_formulas` / `untranscribed_images`
+name pages whose content is present in the PDF but not in the text.
+Treat those regions as unknown, not absent.
 
 **`attach_file` returns `AttachmentOutsideBaseDir`**
 You set `attachment_mode = "linked_file"` and tried to attach a file

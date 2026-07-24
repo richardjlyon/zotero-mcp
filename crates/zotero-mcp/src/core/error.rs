@@ -88,6 +88,29 @@ pub enum Error {
         pdftotext: String,
     },
 
+    #[error(
+        "pdf extraction found no usable text in {path} ({detail}). The PDF is \
+         likely image-only (scanned). Remedy: install ocrmypdf \
+         (`brew install ocrmypdf` on macOS, `apt install ocrmypdf` on Linux) \
+         and/or configure the Docling route (`DOCLING_URL` or `docling_url` \
+         in config.toml) so the OCR pre-step can recover the text."
+    )]
+    PdfNothingExtractable { path: String, detail: String },
+
+    #[error(
+        "pdf {path} has {pages} pages, over the {threshold}-page whole-document \
+         extraction limit. Extracting the whole document at once (OCR + layout \
+         conversion) would exceed the time budget and the response size. Remedy: \
+         request page windows instead — call the extraction tool with a page \
+         range (e.g. from_page/to_page) and walk the {pages} pages a window at a \
+         time; each result reports the total page count so you know when you are done."
+    )]
+    PdfDocumentTooLarge {
+        path: String,
+        pages: u32,
+        threshold: u32,
+    },
+
     #[error("html extraction failed: {0}")]
     Html(String),
 
@@ -153,6 +176,19 @@ mod tests {
         let s = e.to_string();
         assert!(s.contains("60"));
         assert!(s.contains("/tmp/a.pdf"));
+    }
+
+    #[test]
+    fn pdf_nothing_extractable_names_the_ocr_remedy() {
+        let e = Error::PdfNothingExtractable {
+            path: "/tmp/scan.pdf".into(),
+            detail: "all routes yielded sub-floor text".into(),
+        };
+        let s = e.to_string();
+        assert!(s.contains("/tmp/scan.pdf"));
+        assert!(s.contains("sub-floor"));
+        assert!(s.contains("ocrmypdf"));
+        assert!(s.contains("DOCLING_URL"));
     }
 
     #[test]
