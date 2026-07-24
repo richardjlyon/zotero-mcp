@@ -23,6 +23,11 @@
         <string>https://laptop.stoat-minnow.ts.net</string>
         <key>RUST_LOG</key>
         <string>info,tower_http=debug</string>
+        <!-- launchd's default PATH is /usr/bin:/bin, which hides the
+             ocrmypdf (~/.local/bin) and pdftotext (Homebrew) binaries the
+             PDF extraction stack resolves at startup. -->
+        <key>PATH</key>
+        <string>/Users/rjl/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
     </dict>
 
     <key>RunAtLoad</key>
