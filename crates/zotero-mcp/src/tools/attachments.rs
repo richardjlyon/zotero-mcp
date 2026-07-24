@@ -236,7 +236,10 @@ pub async fn attach_file_t(
         filename: a.filename,
         content_type: a.content_type,
     };
-    let path = PathBuf::from(crate::core::config::expand_tilde(&a.file_path));
+    let path = PathBuf::from(crate::core::config::remap_path(
+        &cfg.path_map,
+        &a.file_path,
+    ));
     let key = attach_file(&s.api, &a.parent_key, &path, &opts)
         .await
         .map_err(map_err)?;
