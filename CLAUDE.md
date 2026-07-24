@@ -27,7 +27,7 @@
 ## Project brain (the vault)
 
 Project context — architecture decisions, release state, the offload-spec backlog, open
-questions — lives in the second-brain vault: `/vault/brain/Projects/Zotero MCP.md` (hub).
+questions — lives in the second-brain vault: `~/Resilio/second-brain/Projects/Zotero MCP.md` (hub).
 Load it with `/obsidian-projects zotero`; save state back at session end with
 `/obsidian-log` or `/obsidian-save`. (Migrated 2026-07-23 from the old Cowork workspace,
 now archived. Note: the VM reads a read-only Resilio mirror of the Mac's ~/Zotero data;
