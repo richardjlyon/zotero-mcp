@@ -103,6 +103,7 @@ fn create_schema(c: &Connection) {
             isExternal INT NOT NULL
         );
         CREATE TABLE itemNotes (itemID INTEGER PRIMARY KEY, parentItemID INT, note TEXT, title TEXT);
+        CREATE TABLE deletedItems (itemID INTEGER PRIMARY KEY, dateDeleted TIMESTAMP);
     "#).unwrap();
 }
 
@@ -115,19 +116,22 @@ fn insert_minimal_data(c: &Connection) {
     c.execute("INSERT INTO libraries(libraryID) VALUES (1)", [])
         .unwrap();
     c.execute("INSERT INTO itemTypes(itemTypeID, typeName) VALUES (2, 'book'), (4, 'journalArticle'), (14, 'webpage'), (3, 'attachment'), (12, 'note'), (37, 'annotation')", []).unwrap();
-    c.execute("INSERT INTO fields(fieldID, fieldName) VALUES (1, 'title'), (3, 'date'), (4, 'publisher'), (52, 'DOI'), (60, 'url'), (90, 'abstractNote')", []).unwrap();
-    c.execute("INSERT INTO fieldsCombined(fieldID, fieldName) VALUES (1, 'title'), (3, 'date'), (4, 'publisher'), (52, 'DOI'), (60, 'url'), (90, 'abstractNote')", []).unwrap();
+    c.execute("INSERT INTO fields(fieldID, fieldName) VALUES (1, 'title'), (3, 'date'), (4, 'publisher'), (7, 'place'), (11, 'ISBN'), (52, 'DOI'), (60, 'url'), (90, 'abstractNote')", []).unwrap();
+    c.execute("INSERT INTO fieldsCombined(fieldID, fieldName) VALUES (1, 'title'), (3, 'date'), (4, 'publisher'), (7, 'place'), (11, 'ISBN'), (52, 'DOI'), (60, 'url'), (90, 'abstractNote')", []).unwrap();
     c.execute(
         "INSERT INTO creatorTypes(creatorTypeID, creatorType) VALUES (1, 'author'), (2, 'editor')",
         [],
     )
     .unwrap();
 
-    // Item 1: a book "What is Modern Israel?" by Yakob Rabkin
+    // Item 1: a book "What is Modern Israel?" by Yakob Rabkin.
+    // The first name is deliberately misspelt (should be "Yakov"): this is the
+    // 2026-05-13 "Yakob" duplicate that slipped past a title-only dup check.
+    // A surname pass finds it regardless, which is what find_duplicates tests.
     c.execute("INSERT INTO items VALUES (1, 2, '2026-05-01 00:00:00', '2026-05-01 00:00:00', '2026-05-01 00:00:00', 1, 'JGF2UTMW', 10005, 0)", []).unwrap();
-    c.execute("INSERT INTO itemDataValues VALUES (1, 'What is Modern Israel?'), (2, '2016'), (3, 'Pluto Press')", []).unwrap();
+    c.execute("INSERT INTO itemDataValues VALUES (1, 'What is Modern Israel?'), (2, '2016'), (3, 'Pluto Press'), (4, '9781844674879')", []).unwrap();
     c.execute(
-        "INSERT INTO itemData VALUES (1, 1, 1), (1, 3, 2), (1, 4, 3)",
+        "INSERT INTO itemData VALUES (1, 1, 1), (1, 3, 2), (1, 4, 3), (1, 11, 4)",
         [],
     )
     .unwrap();
@@ -165,6 +169,41 @@ fn insert_minimal_data(c: &Connection) {
     c.execute("INSERT INTO items VALUES (5, 3, '2026-05-03 00:00:00', '2026-05-03 00:00:00', '2026-05-03 00:00:00', 1, 'BBBB0002', 6, 0)", []).unwrap();
     c.execute(
         "INSERT INTO itemAttachments VALUES (5, 4, 1, 'text/html', 'storage:article.html', 0)",
+        [],
+    )
+    .unwrap();
+
+    // Item 7: "Gaza: An inquest into its martyrdom", also by Rabkin, NO attachment.
+    // Two jobs. (a) The stored title carries a colon, so a single-substring
+    // search for "Gaza An Inquest Into Its Martyrdom" can never match it — the
+    // 2026-05-13 punctuation failure. (b) It shares a surname but no content
+    // word with "What is Modern Israel", so it must be discarded from an
+    // author-pass result set for that input.
+    c.execute("INSERT INTO items VALUES (7, 2, '2026-05-05 00:00:00', '2026-05-05 00:00:00', '2026-05-05 00:00:00', 1, 'GAZA0001', 20, 0)", []).unwrap();
+    c.execute(
+        "INSERT INTO itemDataValues VALUES (30, 'Gaza: An inquest into its martyrdom'), (31, '2018')",
+        [],
+    )
+    .unwrap();
+    c.execute("INSERT INTO itemData VALUES (7, 1, 30), (7, 3, 31)", [])
+        .unwrap();
+    c.execute("INSERT INTO itemCreators VALUES (7, 1, 1, 0)", [])
+        .unwrap();
+
+    // Item 8: a trashed near-duplicate of item 1. A trashed item must never be
+    // offered as a duplicate — it would trigger a spurious abort.
+    c.execute("INSERT INTO items VALUES (8, 2, '2026-05-06 00:00:00', '2026-05-06 00:00:00', '2026-05-06 00:00:00', 1, 'TRSH0001', 21, 0)", []).unwrap();
+    c.execute(
+        "INSERT INTO itemDataValues VALUES (40, 'What is Modern Israel?'), (41, '2016')",
+        [],
+    )
+    .unwrap();
+    c.execute("INSERT INTO itemData VALUES (8, 1, 40), (8, 3, 41)", [])
+        .unwrap();
+    c.execute("INSERT INTO itemCreators VALUES (8, 1, 1, 0)", [])
+        .unwrap();
+    c.execute(
+        "INSERT INTO deletedItems VALUES (8, '2026-05-07 00:00:00')",
         [],
     )
     .unwrap();

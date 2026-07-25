@@ -1,6 +1,8 @@
 use crate::core::cache::DiskCache;
+use crate::core::enrichment::resilience::{decode_attempt, get_with_retry, LookupFailure};
 use crate::core::enrichment::NormalizedRecord;
 use crate::core::error::{Error, Result};
+use crate::core::isbn::{isbn_variants, normalise_isbn};
 use crate::core::types::Creator;
 use serde_json::{Map, Value};
 
@@ -24,22 +26,47 @@ impl OpenLibraryClient {
         }
     }
 
+    /// Look up a book by ISBN, in whichever form the caller has.
+    ///
+    /// OpenLibrary indexes some editions under the ISBN-10 and some under the
+    /// ISBN-13, while the caller has whatever is printed on the book — so a
+    /// failure on the given form is not the end of the lookup. Each form gets
+    /// one retry on a transient fault before the next form is tried, and if
+    /// they all fail the error carries the whole attempt trail.
     pub async fn lookup_isbn(&self, isbn: &str) -> Result<NormalizedRecord> {
-        let key = format!("openlibrary:isbn:{}", isbn);
+        let normalised = normalise_isbn(isbn);
+        let key = format!("openlibrary:isbn:{}", normalised);
         if let Some(v) = self.cache.get::<Value>(&key).await? {
-            return self.from_book_json(v, isbn).await;
+            return self.from_book_json(v, &normalised).await;
         }
-        let url = format!("{}/isbn/{}.json", self.base, isbn);
-        let resp = self.http.get(&url).send().await?;
-        if !resp.status().is_success() {
-            return Err(Error::Lookup {
-                r#source: "openlibrary".into(),
-                message: format!("HTTP {}", resp.status()),
-            });
+
+        let mut attempts = Vec::new();
+        for form in isbn_variants(&normalised) {
+            let url = format!("{}/isbn/{}.json", self.base, form);
+            let Some(resp) = get_with_retry(&self.http, &url, &form, &mut attempts).await else {
+                continue;
+            };
+            let book: Value = match resp.json().await {
+                Ok(b) => b,
+                Err(e) => {
+                    attempts.push(decode_attempt(&form, &e));
+                    continue;
+                }
+            };
+            self.cache.put(&key, &book).await.ok();
+            return self.from_book_json(book, &form).await;
         }
-        let book: Value = resp.json().await?;
-        self.cache.put(&key, &book).await.ok();
-        self.from_book_json(book, isbn).await
+
+        tracing::warn!(
+            isbn = %normalised,
+            attempts = attempts.len(),
+            "openlibrary lookup failed on every identifier form"
+        );
+        Err(Error::LookupFailed(Box::new(LookupFailure::new(
+            "openlibrary",
+            &normalised,
+            attempts,
+        ))))
     }
 
     async fn from_book_json(&self, book: Value, isbn: &str) -> Result<NormalizedRecord> {

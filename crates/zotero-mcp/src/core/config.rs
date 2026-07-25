@@ -77,16 +77,21 @@ pub struct ZoteroConfig {
     #[serde(default)]
     pub ocrmypdf_path: Option<String>,
 
-    /// Storage model for attachments created via `attach_file`. Default
-    /// mirrors Zotero's own default behaviour. Set to `"linked_file"` for
-    /// BYO-storage users (Resilio Sync, Syncthing, NAS-backed Zotero data dirs).
-    #[serde(default = "default_attachment_mode")]
-    pub attachment_mode: String,
+    /// **DEPRECATED (v0.4.0), ignored.** Storage mode is not this server's
+    /// decision: `attach_file` stores a file the way Zotero's own UI would,
+    /// and Zotero's file-sync preference (cloud, WebDAV, none) decides where
+    /// the bytes go from there. Still parsed so existing config files don't
+    /// break; a WARN is logged when present. Removal at v0.5.x. If you
+    /// genuinely need a path-reference attachment, pass
+    /// `mode = "linked_file"` on the individual `attach_file` call.
+    #[serde(default)]
+    pub attachment_mode: Option<String>,
 
-    /// Required when `attachment_mode = "linked_file"`. Absolute path to the
-    /// Zotero "Linked Attachment Base Directory" (Zotero Preferences →
-    /// Advanced → Files & Folders). Files attached via `attach_file` must
-    /// live inside this directory.
+    /// **DEPRECATED (v0.4.0), ignored.** Was the Zotero "Linked Attachment
+    /// Base Directory" used to relativise `linked_file` paths. No call path
+    /// reads it; an explicit per-call `mode = "linked_file"` stores the
+    /// file's absolute path. Still parsed, warns when present, removal at
+    /// v0.5.x.
     #[serde(default)]
     pub linked_attachment_base_dir: Option<String>,
 
@@ -125,10 +130,6 @@ fn default_docling_health_timeout_secs() -> u64 {
     5
 }
 
-fn default_attachment_mode() -> String {
-    "imported_file".into()
-}
-
 fn default_max_attachment_bytes() -> usize {
     50 * 1024 * 1024
 }
@@ -154,7 +155,7 @@ impl Default for ZoteroConfig {
             docling_convert_timeout_secs: 300,
             docling_health_timeout_secs: 5,
             ocrmypdf_path: None,
-            attachment_mode: "imported_file".into(),
+            attachment_mode: None,
             linked_attachment_base_dir: None,
             max_attachment_bytes: 50 * 1024 * 1024,
             path_map: std::collections::BTreeMap::new(),
@@ -237,10 +238,40 @@ impl Config {
         if let Some(path) = config_path() {
             if path.exists() {
                 let text = std::fs::read_to_string(&path)?;
-                return Ok(toml::from_str(&text)?);
+                let cfg: Self = toml::from_str(&text)?;
+                for w in cfg.deprecation_warnings() {
+                    tracing::warn!("{w}");
+                }
+                return Ok(cfg);
             }
         }
         Ok(Self::default())
+    }
+
+    /// One human-readable warning per deprecated config key that is present
+    /// but no longer does anything. Logged at WARN by [`Config::load`];
+    /// returned rather than logged in place so the set is exactly testable.
+    pub fn deprecation_warnings(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        if self.zotero.attachment_mode.is_some() {
+            out.push(
+                "[zotero] attachment_mode is deprecated and ignored: attach_file now stores \
+                 files the way Zotero's own UI would, and your Zotero file-sync preference \
+                 (cloud, WebDAV, or none) decides where the bytes go. Pass mode = \
+                 \"linked_file\" on an individual attach_file call if you need a path \
+                 reference. Remove the key; it goes away at v0.5.x."
+                    .to_string(),
+            );
+        }
+        if self.zotero.linked_attachment_base_dir.is_some() {
+            out.push(
+                "[zotero] linked_attachment_base_dir is deprecated and ignored: no call path \
+                 reads it, and an explicit per-call mode = \"linked_file\" stores the file's \
+                 absolute path. Remove the key; it goes away at v0.5.x."
+                    .to_string(),
+            );
+        }
+        out
     }
 
     pub fn resolved_data_dir(&self) -> PathBuf {
@@ -415,11 +446,12 @@ ocrmypdf_path = "/Users/rjl/.local/bin/ocrmypdf"
     }
 
     #[test]
-    fn attachment_mode_defaults_to_imported_file() {
+    fn attachment_mode_absent_by_default() {
         let c = Config::default();
-        assert_eq!(c.zotero.attachment_mode, "imported_file");
+        assert!(c.zotero.attachment_mode.is_none());
         assert!(c.zotero.linked_attachment_base_dir.is_none());
         assert_eq!(c.zotero.max_attachment_bytes, 50 * 1024 * 1024);
+        assert!(c.deprecation_warnings().is_empty());
     }
 
     #[test]
@@ -438,21 +470,37 @@ pdf_whole_document_max_pages = 12
         assert_eq!(c.zotero.pdf_whole_document_max_pages, 12);
     }
 
+    // Deprecated as of v0.4.0 (storage-mode simplification): both keys still
+    // parse so nobody's config.toml breaks on upgrade, but nothing reads them.
     #[test]
-    fn attachment_mode_parses_from_toml() {
+    fn deprecated_attachment_fields_parse_and_warn() {
         let toml = r#"
 [zotero]
 attachment_mode = "linked_file"
 linked_attachment_base_dir = "/Users/rjl/Resilio/Zotero-Attachments"
 max_attachment_bytes = 104857600
 "#;
-        let c: Config = toml::from_str(toml).unwrap();
-        assert_eq!(c.zotero.attachment_mode, "linked_file");
+        let c: Config = toml::from_str(toml).expect("deprecated keys must still parse");
+        // Still parsed (so an old config is not a hard error) …
+        assert_eq!(c.zotero.attachment_mode.as_deref(), Some("linked_file"));
         assert_eq!(
             c.zotero.linked_attachment_base_dir.as_deref(),
             Some("/Users/rjl/Resilio/Zotero-Attachments")
         );
+        // … and non-deprecated neighbours in the same table are unaffected.
         assert_eq!(c.zotero.max_attachment_bytes, 104857600);
+
+        // … but each one warns, and says it is ignored.
+        let warnings = c.deprecation_warnings();
+        assert_eq!(warnings.len(), 2, "got {warnings:?}");
+        assert!(warnings.iter().any(|w| w.contains("attachment_mode")));
+        assert!(warnings
+            .iter()
+            .any(|w| w.contains("linked_attachment_base_dir")));
+        assert!(
+            warnings.iter().all(|w| w.contains("ignored")),
+            "{warnings:?}"
+        );
     }
 
     #[test]

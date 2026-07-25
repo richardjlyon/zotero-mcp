@@ -1,6 +1,7 @@
 use crate::core::pdf::{get_pdf_first_pages, get_pdf_text, PdfTextResult};
 use crate::core::reader::annotations::list_annotations;
 use crate::core::reader::attachments::{list_attachments, resolve_path};
+use crate::core::types::{Annotation, Attachment};
 use crate::core::web::{
     get_webpage_content, refetch_url, RefetchResult, WebContentResult, WebMode,
 };
@@ -10,6 +11,7 @@ use crate::core::writer::attachments::{
 use crate::core::writer::items::create_item;
 use crate::state::AppState;
 use crate::tools::search::map_err;
+use crate::tools::wire::ListResult;
 use rmcp::model::{CallToolResult, Content};
 use rmcp::ErrorData as Error;
 use rmcp::Json;
@@ -34,13 +36,14 @@ pub struct ItemKeyArgs {
     pub item_key: String,
 }
 
-pub async fn list_attachments_t(s: &AppState, a: ItemKeyArgs) -> Result<CallToolResult, Error> {
+pub async fn list_attachments_t(
+    s: &AppState,
+    a: ItemKeyArgs,
+) -> Result<Json<ListResult<Attachment>>, Error> {
     let r = list_attachments(&s.pool, &a.item_key, 1, &s.cfg.storage_dir())
         .await
         .map_err(map_err)?;
-    Ok(CallToolResult::success(vec![Content::json(
-        serde_json::to_value(&r).unwrap(),
-    )?]))
+    Ok(Json(ListResult::complete(r)))
 }
 
 pub async fn get_pdf_path(s: &AppState, a: ItemKeyArgs) -> Result<CallToolResult, Error> {
@@ -135,13 +138,14 @@ pub async fn get_pdf_first_pages_t(
     Ok(Json(r))
 }
 
-pub async fn list_annotations_t(s: &AppState, a: ItemKeyArgs) -> Result<CallToolResult, Error> {
+pub async fn list_annotations_t(
+    s: &AppState,
+    a: ItemKeyArgs,
+) -> Result<Json<ListResult<Annotation>>, Error> {
     let r = list_annotations(&s.pool, &a.item_key, 1)
         .await
         .map_err(map_err)?;
-    Ok(CallToolResult::success(vec![Content::json(
-        serde_json::to_value(&r).unwrap(),
-    )?]))
+    Ok(Json(ListResult::complete(r)))
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
@@ -249,9 +253,11 @@ pub struct AttachFileArgs {
     pub parent_key: String,
     /// Absolute path to a local file.
     pub file_path: String,
-    /// Override the config-default attachment mode. "imported_file" uploads
-    /// bytes to Zotero cloud storage; "linked_file" stores a path reference
-    /// (BYO storage). Omit to use cfg.zotero.attachment_mode.
+    /// Advanced escape hatch — omit it. Omitted means the file is stored the
+    /// way Zotero's own UI would store it, which is what you almost always
+    /// want. "linked_file" makes Zotero store only a path reference to the
+    /// file instead of the file itself, for BYO-storage setups (a Calibre
+    /// mirror, a shared NAS); "imported_file" names the default explicitly.
     #[serde(default)]
     pub mode: Option<String>,
     #[serde(default)]
@@ -260,20 +266,28 @@ pub struct AttachFileArgs {
     pub content_type: Option<String>,
 }
 
+/// Resolve the storage mode for one `attach_file` call.
+///
+/// Config does not participate. An omitted `mode` means "store it the way
+/// Zotero's own UI would", which is the imported-file route; where the bytes
+/// travel from there is Zotero's own file-sync preference, not this server's
+/// decision. An unrecognised `mode` string falls back to the same route
+/// (with a WARN, via [`AttachmentMode::from_config`]) rather than erroring.
+fn resolve_mode(mode: Option<&str>) -> AttachmentMode {
+    mode.map(AttachmentMode::from_config)
+        .unwrap_or(AttachmentMode::ImportedFile)
+}
+
 pub async fn attach_file_t(
     s: &AppState,
     a: AttachFileArgs,
 ) -> Result<Json<AttachmentResult>, Error> {
     let cfg = &s.cfg.zotero;
-    let mode_str = a.mode.as_deref().unwrap_or(&cfg.attachment_mode);
-    let mode = AttachmentMode::from_config(mode_str);
     let opts = AttachFileOptions {
-        mode,
-        linked_attachment_base_dir: cfg
-            .linked_attachment_base_dir
-            .as_deref()
-            .map(crate::core::config::expand_tilde)
-            .map(PathBuf::from),
+        mode: resolve_mode(a.mode.as_deref()),
+        // Never config-derived: an explicit `mode: "linked_file"` call stores
+        // the file's absolute path. Only direct core-API callers set a base dir.
+        linked_attachment_base_dir: None,
         storage_dir: s.cfg.storage_dir(),
         max_attachment_bytes: cfg.max_attachment_bytes,
         filename: a.filename,
@@ -286,4 +300,37 @@ pub async fn attach_file_t(
     Ok(Json(AttachmentResult {
         attachment_key: key,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The storage-mode simplification guard (v0.4.0): an omitted `mode` is not
+    // "look up the config default" any more — it is "the way Zotero's UI would".
+    #[test]
+    fn omitted_mode_routes_to_imported_file() {
+        assert_eq!(resolve_mode(None), AttachmentMode::ImportedFile);
+    }
+
+    #[test]
+    fn explicit_linked_file_still_honoured() {
+        assert_eq!(
+            resolve_mode(Some("linked_file")),
+            AttachmentMode::LinkedFile
+        );
+    }
+
+    #[test]
+    fn explicit_imported_file_still_honoured() {
+        assert_eq!(
+            resolve_mode(Some("imported_file")),
+            AttachmentMode::ImportedFile
+        );
+    }
+
+    #[test]
+    fn unknown_mode_falls_back_to_imported_file() {
+        assert_eq!(resolve_mode(Some("nonsense")), AttachmentMode::ImportedFile);
+    }
 }

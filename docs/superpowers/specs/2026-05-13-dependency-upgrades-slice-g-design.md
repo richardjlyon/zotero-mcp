@@ -362,3 +362,29 @@ All 18 `JsonSchema` derives on `core/types.rs`, `core/pdf.rs`, `core/web.rs`, `c
 ### 5. Test count
 
 Lib tests: **108** (was 107 at Slice F baseline; +1 from the new `output_schemas_emitted_for_json_returning_tools` smoke test). Smoke test asserts `output_schema.is_some()` on 4 migrated tools and `output_schema.is_none()` on 3 text-returning tools + 2 deferred-Vec tools (regression guard).
+
+---
+
+## Resolved 2026-07-25
+
+The two deferrals above are closed. Do not read the "deferred until the
+wire-format question is settled" notes as open work.
+
+- **The nine Vec-returning tools are migrated.** Richard settled the wire-format
+  question on 2026-07-25, choosing the envelope with the shape change accepted.
+  The objection recorded above — "Cowork's behaviour against the migrated wire
+  format is unverified" — turned out to rest on a false premise: Cowork is not
+  and never was a client of this server. See
+  `2026-07-25-slice-g-wire-format-decision.md` for the options and
+  `2026-07-25-slice-g-list-envelope-design.md` for what was built.
+
+- **The three lookup tools are a decision, not a deferral.** Also corrected: this
+  spec assumed they needed a `format`-parameter redesign because
+  `serde_json::Value` has no root type. `serde_json::Map<String, Value>` *does*
+  produce `type: object`, so they could migrate untouched — but the schema would
+  advertise only "an object", and migrating would displace the structured
+  `lookup_failed` body added on 2026-07-25. They stay on `CallToolResult`
+  deliberately.
+
+End state: 19 of 22 tools strictly typed. Tool count 35 (Slice F's 34 plus
+`find_duplicates`).

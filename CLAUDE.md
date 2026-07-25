@@ -9,7 +9,7 @@
 - **MCP tool annotations** (`read_only_hint` / `destructive_hint` / `idempotent_hint` / `open_world_hint`) are mandatory on new tools — see the existing 34 for examples.
 - **Output shapes** prefer typed `Json<T>` with derived `JsonSchema` over loose `CallToolResult` text. Slice G is migrating the residual.
 - **Releases** are tagged `v0.x.0`. The crate published to crates.io is `zotero-mcp`.
-- **Mirror tax.** The Plan-8 transport stack (`bearer.rs`, `oauth.rs`, `oauth/token_store.rs`, `http_transport.rs`, `setup.rs`) is duplicated into the sister repo `things-mcp` (`mcp-things` — path varies by machine; on the VM it will be `/vault/code/mcp-things` once migrated) by deliberate choice — no shared library extraction (pinned principle). Any fix to one of those modules MUST be cherry-picked to the sister repo in the same session, or the repos silently drift.
+- **Mirror tax — DISCHARGED 2026-07-25.** The Plan-8 transport stack (`bearer.rs`, `oauth.rs`, `oauth/token_store.rs`, `http_transport.rs`, `setup.rs`) used to be duplicated into the sister repo `things-mcp` (`mcp-things`), with a pinned rule that any fix be cherry-picked across in the same session or the repos would silently drift. **Things MCP was retired on 2026-07-25 along with Things itself, so this repo is now the sole owner of that code and the cherry-pick rule no longer applies.** Edit those five modules freely. The history is still worth knowing: a shared-library extraction was attempted and dropped (see the vault's `MCP Cowork Bridge` note), and the duplication was a deliberate choice rather than an oversight.
 
 ## Layout
 

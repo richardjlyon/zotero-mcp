@@ -7,6 +7,7 @@ pub mod crossref;
 pub mod openlibrary;
 pub mod pdf_signals;
 pub mod propose;
+pub mod resilience;
 pub mod scoring;
 pub mod semantic_scholar;
 

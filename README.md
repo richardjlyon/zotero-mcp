@@ -357,9 +357,25 @@ Full setup notes including manual / non-macOS deployment in
 
 ## Tools
 
-All 34 tools the server exposes, grouped by purpose. Tool descriptions
+All 35 tools the server exposes, grouped by purpose. Tool descriptions
 are paraphrased from each tool's `#[tool(description = …)]` declaration
 — what Claude itself sees when deciding which tool to call.
+
+The nine list-returning tools (`search_items`, `list_recent_items`,
+`list_collections`, `list_tags`, `list_attachments`, `list_annotations`,
+`search_crossref`, `search_semantic_scholar`, `find_weak_metadata_items`)
+all answer in the same envelope rather than a bare JSON array:
+
+```jsonc
+{ "items": [ … ], "count": 7, "possibly_truncated": false }
+```
+
+The envelope is required — MCP demands an object at the root of a tool's
+declared output schema, and a bare array is not one — and it carries the
+answer to a question the array could not: `possibly_truncated` is true
+when the response filled the limit that was applied, so the library may
+hold more matches than are shown. Ask again with a higher `limit` or an
+`offset`.
 
 ### Discover and browse
 
@@ -372,7 +388,8 @@ are paraphrased from each tool's `#[tool(description = …)]` declaration
 | `list_tags` | Tags, optionally prefix-filtered |
 | `list_attachments` | File attachments and snapshots for an item, with resolved absolute paths |
 | `list_annotations` | PDF highlights and comments for an item |
-| `find_weak_metadata_items` | Items with missing DOI/abstract or stub titles (enrichment candidates) |
+| `find_weak_metadata_items` | Items with missing DOI/abstract or stub titles (enrichment candidates), each as `{item_key, weak_fields}` |
+| `find_duplicates` | **Is this already in the library?** The dedup gate to run *before* creating an item: three passes (individual title words, author surname, identifier in every plausible form), unioned, trash-excluded, each candidate triaged with a recommended action (`abort` / `attach_to_existing` / `ask` / `create_new`) and a note of what the existing record is missing. Matches through punctuation differences and misspelt first names, both of which defeated the older hand-rolled check |
 
 ### Read content
 
@@ -388,11 +405,32 @@ are paraphrased from each tool's `#[tool(description = …)]` declaration
 
 | Tool | What it does |
 |------|--------------|
-| `lookup_doi` | DOI → flat Zotero-shaped JSON via CrossRef. `format="zotero"` (default) returns an item ready to pass straight to `create_item`; `format="candidate"` returns an envelope for use with `propose_metadata_update`/`enrich_item` |
-| `lookup_isbn` | ISBN → flat Zotero-shaped JSON via OpenLibrary (same `format` choice as above; freeform `publish_date` normalised to ISO 8601) |
-| `lookup_arxiv` | arXiv ID → flat Zotero-shaped JSON (same `format` choice as above) |
+| `lookup_doi` | DOI → flat Zotero-shaped JSON via CrossRef. `format="zotero"` (default) returns an item ready to pass straight to `create_item`; `format="candidate"` returns an envelope for use with `propose_metadata_update`/`enrich_item`. Accepts a DOI in any form (`https://doi.org/…`, `doi:…`) |
+| `lookup_isbn` | ISBN → flat Zotero-shaped JSON via OpenLibrary (same `format` choice as above; freeform `publish_date` normalised to ISO 8601). Hyphens optional, and if the given form is not indexed the other one (ISBN-10 ↔ ISBN-13) is tried automatically |
+| `lookup_arxiv` | arXiv ID → flat Zotero-shaped JSON (same `format` choice as above). Accepts `arXiv:2401.12345`, a bare id, an abs URL, or an old-style `hep-th/9901001` |
 | `search_crossref` | Free-text CrossRef search; normalized candidates |
 | `search_semantic_scholar` | Free-text Semantic Scholar search; normalized candidates |
+
+All three `lookup_*` tools retry once when the catalogue has a transient
+fault (5xx, 429, connection error, timeout) and do *not* retry a genuine
+"not found" — a 404 from CrossRef means CrossRef does not have that DOI.
+When every attempt fails they return an error result whose body is
+structured rather than prose:
+
+```jsonc
+{
+  "error": "lookup_failed",
+  "source": "openlibrary",
+  "identifier": "9781844674879",
+  "attempts": [ { "identifier": "…", "status": "http_503", "transient": true }, … ],
+  "suggestion": "fall_back_to_hand_built"
+}
+```
+
+`suggestion` is `fall_back_to_hand_built` when the catalogue simply
+doesn't have the record or wasn't reachable, and `stop_and_ask` when
+something is wrong with the request or our access (400/401/403/422) —
+where hand-building a record would paper over a real problem.
 
 When emitted as flat Zotero items (the default), the lookup tools stash
 provenance in Zotero's `extra` field as newline-separated `key: value`
@@ -428,7 +466,7 @@ default `format="zotero"` will fail validation.
 | Tool | What it does |
 |------|--------------|
 | `create_item` | Create a new Zotero item from a JSON metadata object. The default-format output of `lookup_doi` / `lookup_isbn` / `lookup_arxiv` drops straight in with no transform |
-| `attach_file` | Attach a local file as a child of an item; supports `imported_file` (copies bytes into Zotero's managed `storage/<key>/` dir; desktop client syncs to your configured backend — cloud or WebDAV) and `linked_file` (path reference for BYO-storage setups like Resilio/Syncthing) |
+| `attach_file` | Attach a local file as a child of an item. Stored the way Zotero's own UI would store it (bytes into the managed `storage/<key>/` dir; Zotero desktop then syncs them per *your* file-sync preference — cloud, WebDAV, or none). `mode` is a rarely-needed escape hatch: pass `"linked_file"` if you want Zotero to hold a path reference instead of the file (Calibre mirror, shared NAS) |
 | `attach_link` | Attach a URL as a `linked_url` child (no bytes transfer) |
 | `add_note` | Markdown/HTML note attached to an item |
 | `update_item_fields` | Patch arbitrary fields (auto-detects version for `If-Unmodified-Since-Version`) |
@@ -512,17 +550,18 @@ docling_health_timeout_secs = 5
 # pre-step is skipped and the gap is recorded in the completeness report.
 # ocrmypdf_path = "/opt/homebrew/bin/ocrmypdf"
 
-# attach_file storage mode. "imported_file" copies bytes into
-# <data_dir>/storage/<key>/<filename> — the same on-disk layout Zotero's
-# UI produces. Zotero desktop's sync engine then pushes the file to
-# whichever backend you have configured (Zotero cloud, WebDAV, or none).
-# "linked_file" stores only a path reference (BYO storage, e.g. Resilio
-# Sync, Syncthing, NAS-backed Zotero).
-attachment_mode = "imported_file"
-
-# Required when attachment_mode = "linked_file". Files attached via
-# attach_file must live inside this directory.
-# linked_attachment_base_dir = "/Users/you/Resilio/Zotero-Attachments"
+# DEPRECATED, ignored, removed at v0.5.x:
+#   attachment_mode
+#   linked_attachment_base_dir
+# Storage mode was never this server's decision. attach_file stores a file
+# at <data_dir>/storage/<key>/<filename> — the same on-disk layout Zotero's
+# own UI produces — and Zotero desktop's sync engine then pushes it to
+# whichever file backend YOU have configured (Zotero cloud, WebDAV, or
+# none): https://www.zotero.org/support/sync#file_syncing
+# Both keys still parse, so an older config.toml keeps working, but a WARN
+# is logged at startup and neither value affects anything. If you genuinely
+# want a path reference rather than the file, pass mode = "linked_file" on
+# the individual attach_file call.
 
 # Per-file size ceiling for attach_file. Default: 50 MB.
 max_attachment_bytes = 52428800
@@ -591,9 +630,21 @@ name pages whose content is present in the PDF but not in the text.
 Treat those regions as unknown, not absent.
 
 **`attach_file` returns `AttachmentOutsideBaseDir`**
-You set `attachment_mode = "linked_file"` and tried to attach a file
-that isn't under `linked_attachment_base_dir`. Either move the file
-in, or pass `mode = "imported_file"` for that specific call.
+Can no longer come from config — the two storage-mode config keys are
+deprecated no-ops as of v0.4.0. It now only arises when a direct caller
+of the core `attach_file` function supplies a linked-attachment base
+directory and a file outside it. From the MCP tool surface, omit `mode`
+and Zotero stores the file the way its own UI would.
+
+**A `lookup_*` tool returns `lookup_failed`**
+Every attempt failed — the body lists them. Read `suggestion`: with
+`fall_back_to_hand_built` the catalogue either doesn't have the record or
+wasn't reachable, so building the item by hand from the PDF's own front
+matter is reasonable (note the provenance in `extra`). With
+`stop_and_ask` something is wrong with the request or our access
+(400/401/403/422) and hand-building would hide it. `attempts` shows which
+identifier forms were tried, so an ISBN that failed on both forms really
+was tried both ways.
 
 **HTTP mode: 401 from the public URL after `zotero-mcp setup`**
 That's the OAuth gate working as intended. Use the paste-ready block

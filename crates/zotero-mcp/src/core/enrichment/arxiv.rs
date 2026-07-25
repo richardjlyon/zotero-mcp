@@ -1,4 +1,5 @@
 use crate::core::cache::DiskCache;
+use crate::core::enrichment::resilience::{decode_attempt, get_with_retry, LookupFailure};
 use crate::core::enrichment::NormalizedRecord;
 use crate::core::error::{Error, Result};
 use crate::core::types::Creator;
@@ -24,7 +25,13 @@ impl ArxivClient {
         }
     }
 
+    /// Look up a preprint by arXiv id.
+    ///
+    /// The id is normalised first, so `arXiv:2401.12345` and an abs-URL both
+    /// work, and old-style ids (`hep-th/9901001`) pass through. One retry on a
+    /// transient fault; no alternate form exists.
     pub async fn lookup_arxiv(&self, id: &str) -> Result<NormalizedRecord> {
+        let id = crate::core::identifier::normalise_arxiv_id(id);
         let key = format!("arxiv:{}", id);
         if let Some(v) = self.cache.get::<String>(&key).await? {
             return parse_entry(&v).ok_or_else(|| Error::Lookup {
@@ -33,14 +40,22 @@ impl ArxivClient {
             });
         }
         let url = format!("{}/api/query?id_list={}", self.base, id);
-        let resp = self.http.get(&url).send().await?;
-        if !resp.status().is_success() {
-            return Err(Error::Lookup {
-                r#source: "arxiv".into(),
-                message: format!("HTTP {}", resp.status()),
-            });
-        }
-        let body = resp.text().await?;
+        let mut attempts = Vec::new();
+        let Some(resp) = get_with_retry(&self.http, &url, &id, &mut attempts).await else {
+            tracing::warn!(id = %id, attempts = attempts.len(), "arxiv lookup failed");
+            return Err(Error::LookupFailed(Box::new(LookupFailure::new(
+                "arxiv", &id, attempts,
+            ))));
+        };
+        let body = match resp.text().await {
+            Ok(b) => b,
+            Err(e) => {
+                attempts.push(decode_attempt(&id, &e));
+                return Err(Error::LookupFailed(Box::new(LookupFailure::new(
+                    "arxiv", &id, attempts,
+                ))));
+            }
+        };
         self.cache.put(&key, &body).await.ok();
         parse_entry(&body).ok_or_else(|| Error::Lookup {
             r#source: "arxiv".into(),

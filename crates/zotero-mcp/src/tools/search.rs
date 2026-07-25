@@ -1,9 +1,9 @@
 use crate::core::reader::items::{get_item_by_key, hydrate_citation_key};
-use crate::core::reader::search::{search_metadata, SearchParams};
+use crate::core::reader::search::{search_metadata, SearchParams, DEFAULT_SEARCH_LIMIT};
 use crate::core::reader::{collections, recent, tags};
-use crate::core::types::Item;
+use crate::core::types::{Collection, Item, SearchHit, Tag};
 use crate::state::AppState;
-use rmcp::model::{CallToolResult, Content};
+use crate::tools::wire::ListResult;
 use rmcp::ErrorData as Error;
 use rmcp::Json;
 use schemars::JsonSchema;
@@ -33,7 +33,17 @@ fn default_true() -> bool {
     true
 }
 
-pub async fn search_items(s: &AppState, a: SearchArgs) -> Result<CallToolResult, Error> {
+pub async fn search_items(
+    s: &AppState,
+    a: SearchArgs,
+) -> Result<Json<ListResult<SearchHit>>, Error> {
+    // The core substitutes its default for a non-positive limit; mirror that
+    // here so the truncation flag reflects the limit actually applied.
+    let effective_limit = if a.limit > 0 {
+        a.limit
+    } else {
+        DEFAULT_SEARCH_LIMIT
+    };
     let hits = search_metadata(
         &s.pool,
         1,
@@ -49,9 +59,7 @@ pub async fn search_items(s: &AppState, a: SearchArgs) -> Result<CallToolResult,
     )
     .await
     .map_err(map_err)?;
-    Ok(CallToolResult::success(vec![Content::json(
-        serde_json::to_value(&hits).unwrap(),
-    )?]))
+    Ok(Json(ListResult::with_limit(hits, effective_limit)))
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
@@ -86,11 +94,12 @@ pub async fn get_item(s: &AppState, a: GetItemArgs) -> Result<Json<Item>, Error>
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 pub struct EmptyArgs {}
 
-pub async fn list_collections(s: &AppState, _a: EmptyArgs) -> Result<CallToolResult, Error> {
+pub async fn list_collections(
+    s: &AppState,
+    _a: EmptyArgs,
+) -> Result<Json<ListResult<Collection>>, Error> {
     let cs = collections::list(&s.pool, 1, None).await.map_err(map_err)?;
-    Ok(CallToolResult::success(vec![Content::json(
-        serde_json::to_value(&cs).unwrap(),
-    )?]))
+    Ok(Json(ListResult::complete(cs)))
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
@@ -99,11 +108,9 @@ pub struct ListTagsArgs {
     pub prefix: Option<String>,
 }
 
-pub async fn list_tags(s: &AppState, a: ListTagsArgs) -> Result<CallToolResult, Error> {
+pub async fn list_tags(s: &AppState, a: ListTagsArgs) -> Result<Json<ListResult<Tag>>, Error> {
     let ts = tags::list(&s.pool, 1, a.prefix).await.map_err(map_err)?;
-    Ok(CallToolResult::success(vec![Content::json(
-        serde_json::to_value(&ts).unwrap(),
-    )?]))
+    Ok(Json(ListResult::complete(ts)))
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
@@ -120,11 +127,13 @@ fn default_limit() -> i64 {
     20
 }
 
-pub async fn list_recent_items(s: &AppState, a: RecentArgs) -> Result<CallToolResult, Error> {
+pub async fn list_recent_items(
+    s: &AppState,
+    a: RecentArgs,
+) -> Result<Json<ListResult<SearchHit>>, Error> {
+    let limit = a.limit;
     let r = recent::list(&s.pool, 1, &a.sort_by, a.limit)
         .await
         .map_err(map_err)?;
-    Ok(CallToolResult::success(vec![Content::json(
-        serde_json::to_value(&r).unwrap(),
-    )?]))
+    Ok(Json(ListResult::with_limit(r, limit)))
 }

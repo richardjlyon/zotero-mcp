@@ -6,11 +6,31 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-> A version bump is due at the next release: the `get_pdf_text` /
-> `get_pdf_first_pages` result shape changed (additive fields, but the
-> default output format on the primary route is now markdown).
+## [0.4.0] - 2026-07-25
+
+> **Response shapes changed in this release.** Three groups: the nine
+> list-returning tools now answer in an envelope rather than a bare array;
+> `get_pdf_text` / `get_pdf_first_pages` gained fields and default to markdown
+> on the primary route; and `find_weak_metadata_items` items are now named
+> objects. Details below. Two config keys are deprecated but still parse, so no
+> config file needs editing to upgrade.
 
 ### Added
+
+- **`find_duplicates` — a real dedup gate.** One read-only tool that answers
+  "is this already in the library?" before an item is created, replacing a
+  multi-step procedure that previously lived as prose in a skill and was
+  therefore skippable. Three passes — individual title words, author surname,
+  and identifier in every plausible form (both ISBN forms, URL-wrapped DOIs) —
+  unioned by item key, trashed items excluded, each candidate triaged with a
+  recommended action (`abort` / `attach_to_existing` / `ask` / `create_new`),
+  a title-similarity score, and a note of which fields the existing record
+  lacks. `queries_run` reports every query and its row count, so the caller can
+  show its working. Closes two observed failures: a duplicate missed because the
+  stored author's first name was misspelt, and a title never matched because the
+  stored title carried a colon the query did not — the latter needing token
+  matching, since library search is a single SQL `LIKE` and normalising only the
+  query side cannot help.
 
 - **Page-windowed PDF extraction.** `get_pdf_text` accepts optional
   `from_page` / `to_page` (1-indexed, inclusive) to extract a bounded page
@@ -32,6 +52,66 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Response-shape change: the nine list-returning tools now answer in an
+  envelope.** `search_items`, `list_recent_items`, `list_collections`,
+  `list_tags`, `list_attachments`, `list_annotations`, `search_crossref`,
+  `search_semantic_scholar` and `find_weak_metadata_items` return
+  `{"items": [...], "count": n, "possibly_truncated": bool}` where they
+  previously returned a bare JSON array. This completes Slice G: all nine now
+  declare an `outputSchema` on `tools/list` and populate `structured_content`,
+  which a bare array cannot do — MCP requires an object at the root of a tool's
+  output schema, and rmcp enforces it by refusing to start. Having been obliged
+  to wrap, the envelope earns its place: `possibly_truncated` tells a caller
+  that the response filled its limit and the library may hold more, which a bare
+  array left indistinguishable from a complete result.
+
+  `find_weak_metadata_items` additionally changes its element shape from a
+  positional pair (`["ABC123", ["missing DOI"]]`) to a named object
+  (`{"item_key": "ABC123", "weak_fields": ["missing DOI"]}`).
+
+  The 10 object-returning tools and the 13 text-returning tools are unchanged.
+  The three `lookup_*` tools stay untyped by decision, not deferral: the schema
+  they would gain says only "an object", while migrating would push their
+  structured `lookup_failed` body out of tool content. Reasoning in
+  `docs/superpowers/specs/2026-07-25-slice-g-wire-format-decision.md`.
+
+- **Two new guards on the tool surface.** `tests/tool_surface.rs` walks *every*
+  registered tool and asserts an object-rooted input schema, an object-rooted
+  output schema wherever one exists, a non-empty description and present
+  annotations — the test that was missing when one malformed schema caused a
+  client to reject the entire `tools/list` response, leaving the server
+  connected with zero usable tools. `tests/tool_wire_shape.rs` asserts the
+  actual `content` and `structured_content` of all three response families
+  against the test fixture, so any future change to a response shape is a
+  visible edit to an expectation rather than a discovery in production.
+
+- **`lookup_doi` / `lookup_isbn` / `lookup_arxiv` survive a bad moment
+  upstream.** Each retries once on a transient fault (5xx, 429 — honouring
+  `Retry-After` up to a 5-second ceiling — connection errors, timeouts) and
+  deliberately does not retry a genuine "not found". Identifiers are normalised
+  first, so a DOI pasted as `https://doi.org/…` or an id as `arXiv:2401.12345`
+  works. `lookup_isbn` tries the alternate ISBN form automatically when the
+  given one is not indexed, which is the common case for an older paperback.
+  When every attempt fails the tool returns an error result carrying a
+  structured `lookup_failed` body — the attempt trail plus a `suggestion` of
+  `fall_back_to_hand_built` or `stop_and_ask` — so the caller branches on data
+  instead of parsing an HTTP error string. The observed failure this closes:
+  `lookup_isbn` on a valid paperback ISBN returning a bare
+  `http error: error sending request` with no retry and no alternate form.
+
+- **`attach_file` no longer decides how the bytes are stored.** From an
+  agent's point of view there is only "attach this file to this item"; where
+  the bytes live is Zotero's own file-sync preference (cloud, WebDAV, or
+  none), and the server had no business duplicating that decision at its own
+  layer. `mode` now defaults to `null`, meaning "store it the way Zotero's
+  own UI would" — bytes at `<data_dir>/storage/<key>/<filename>`, sync left
+  to Zotero desktop. Nothing in the call path reads config any more. `mode`
+  survives as an advanced escape hatch: pass `"linked_file"` if you
+  specifically want Zotero to hold a path reference instead of the file
+  (Calibre mirror, shared NAS), in which case the file's absolute path is
+  stored. The tool description and README were rewritten to match; the
+  `AttachmentOutsideBaseDir` error message no longer names a config key.
+
 - **`get_pdf_text` / `get_pdf_first_pages` result shape.** `PdfTextResult`
   gains three fields: `format` (`markdown` | `plain`), `page_anchors`
   (whether `--- p.N ---` page markers are present), and `completeness` — a
@@ -49,6 +129,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `.zotero-ft-cache` → `pdf-extract` → `pdftotext`; the cache is demoted
   below Docling because it is itself a flat extraction. Flat-text results
   always report `complete: false` with an explicit note.
+
+### Deprecated
+
+- **`[zotero] attachment_mode` and `[zotero] linked_attachment_base_dir`.**
+  Both still parse — an existing `config.toml` keeps working — but neither is
+  read by any call path, and a `WARN` naming the key is logged at startup when
+  either is present. Removal at v0.5.x. There is no migration to do: delete
+  the keys and set your file-sync preference in Zotero itself.
 
 ### Added
 

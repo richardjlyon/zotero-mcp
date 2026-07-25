@@ -1,4 +1,5 @@
 use crate::core::cache::DiskCache;
+use crate::core::enrichment::resilience::{decode_attempt, get_with_retry, LookupFailure};
 use crate::core::enrichment::NormalizedRecord;
 use crate::core::error::{Error, Result};
 use crate::core::types::Creator;
@@ -24,7 +25,14 @@ impl CrossrefClient {
         }
     }
 
+    /// Look up a work by DOI.
+    ///
+    /// The DOI is normalised first, so a value pasted from a browser
+    /// (`https://doi.org/10.x/y`) or from a citation (`doi:10.x/y`) works.
+    /// A transient fault is retried once; a 404 is not — it means CrossRef
+    /// does not have that DOI, and there is no alternate form to try.
     pub async fn lookup_doi(&self, doi: &str) -> Result<NormalizedRecord> {
+        let doi = crate::core::identifier::normalise_doi(doi);
         let key = format!("crossref:doi:{}", doi);
         if let Some(v) = self.cache.get::<Value>(&key).await? {
             return normalize_work(&v).ok_or_else(|| Error::Lookup {
@@ -33,14 +41,22 @@ impl CrossrefClient {
             });
         }
         let url = format!("{}/works/{}", self.base, doi);
-        let resp = self.http.get(&url).send().await?;
-        if !resp.status().is_success() {
-            return Err(Error::Lookup {
-                r#source: "crossref".into(),
-                message: format!("HTTP {}", resp.status()),
-            });
-        }
-        let body: Value = resp.json().await?;
+        let mut attempts = Vec::new();
+        let Some(resp) = get_with_retry(&self.http, &url, &doi, &mut attempts).await else {
+            tracing::warn!(doi = %doi, attempts = attempts.len(), "crossref lookup failed");
+            return Err(Error::LookupFailed(Box::new(LookupFailure::new(
+                "crossref", &doi, attempts,
+            ))));
+        };
+        let body: Value = match resp.json().await {
+            Ok(b) => b,
+            Err(e) => {
+                attempts.push(decode_attempt(&doi, &e));
+                return Err(Error::LookupFailed(Box::new(LookupFailure::new(
+                    "crossref", &doi, attempts,
+                ))));
+            }
+        };
         let msg = body.get("message").cloned().unwrap_or_default();
         self.cache.put(&key, &msg).await.ok();
         normalize_work(&msg).ok_or_else(|| Error::Lookup {

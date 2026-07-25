@@ -6,6 +6,8 @@ use crate::core::reader::pool::ReadOnlyPool;
 use crate::core::types::{Diff, EnrichmentProposal, FieldChange, SourceBreakdown};
 use crate::core::writer::client::LocalApi;
 use crate::core::writer::items::update_item_fields;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::path::Path;
 
@@ -30,6 +32,18 @@ pub fn compute_diff(current: &Value, proposed: &Value) -> Diff {
     Diff { changes }
 }
 
+/// An item whose metadata looks stubby, and why.
+///
+/// Named fields rather than the `(String, Vec<String>)` tuple this used to be:
+/// a tuple serialises to a positional array (`["ABC123", ["missing DOI"]]`),
+/// which documents nothing to a reader and cannot carry a useful schema.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct WeakMetadataItem {
+    pub item_key: String,
+    /// Human-readable reasons this item was flagged.
+    pub weak_fields: Vec<String>,
+}
+
 /// Find items whose metadata looks stubby. Heuristics:
 ///   - missing DOI on a journalArticle
 ///   - missing abstractNote
@@ -39,7 +53,7 @@ pub async fn find_weak_metadata_items(
     pool: &ReadOnlyPool,
     library_id: i64,
     limit: i64,
-) -> Result<Vec<(String, Vec<String>)>> {
+) -> Result<Vec<WeakMetadataItem>> {
     pool.with_conn(move |c| {
         let mut out = vec![];
         let mut stmt = c.prepare(
@@ -75,7 +89,7 @@ pub async fn find_weak_metadata_items(
                 reasons.push("missing title".into());
             }
             if !reasons.is_empty() {
-                out.push((key, reasons));
+                out.push(WeakMetadataItem { item_key: key, weak_fields: reasons });
             }
         }
         Ok(out)

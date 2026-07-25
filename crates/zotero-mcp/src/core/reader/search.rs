@@ -2,6 +2,13 @@ use crate::core::error::Result;
 use crate::core::reader::pool::ReadOnlyPool;
 use crate::core::types::SearchHit;
 
+/// Rows returned when a caller supplies no limit (or a non-positive one).
+///
+/// Public because the tool layer needs the same number to tell a caller whether
+/// its results were truncated; duplicating the literal would be a bug waiting
+/// for someone to change one copy.
+pub const DEFAULT_SEARCH_LIMIT: i64 = 50;
+
 #[derive(Debug, Clone, Default)]
 pub struct SearchParams {
     pub query: String,
@@ -19,7 +26,7 @@ pub async fn search_metadata(
     mut params: SearchParams,
 ) -> Result<Vec<SearchHit>> {
     if params.limit <= 0 {
-        params.limit = 50;
+        params.limit = DEFAULT_SEARCH_LIMIT;
     }
 
     pool.with_conn(move |c| {

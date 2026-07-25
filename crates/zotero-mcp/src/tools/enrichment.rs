@@ -2,12 +2,13 @@ use std::collections::BTreeMap;
 
 use crate::core::enrichment::propose::{
     apply_metadata_update, enrich_item, find_weak_metadata_items, propose_metadata_update,
-    EnrichInput, ProposeInput,
+    EnrichInput, ProposeInput, WeakMetadataItem,
 };
 use crate::core::enrichment::NormalizedRecord;
 use crate::core::types::EnrichmentProposal;
 use crate::state::AppState;
 use crate::tools::search::map_err;
+use crate::tools::wire::ListResult;
 use rmcp::model::{CallToolResult, Content};
 use rmcp::ErrorData as Error;
 use rmcp::Json;
@@ -35,13 +36,11 @@ fn fifty() -> i64 {
 pub async fn find_weak_metadata_items_t(
     s: &AppState,
     a: WeakArgs,
-) -> Result<CallToolResult, Error> {
+) -> Result<Json<ListResult<WeakMetadataItem>>, Error> {
     let r = find_weak_metadata_items(&s.pool, 1, a.limit)
         .await
         .map_err(map_err)?;
-    Ok(CallToolResult::success(vec![Content::json(
-        serde_json::to_value(&r).unwrap(),
-    )?]))
+    Ok(Json(ListResult::with_limit(r, a.limit)))
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
@@ -65,10 +64,33 @@ fn render_record(record: &NormalizedRecord, format: &str) -> Result<Value, Error
 // lookup_doi/isbn/arxiv return serde_json::Value whose schema has no root
 // "type": "object" — rmcp 1.7 rejects Json<Value> at startup. These tools
 // stay as Content::json until the API is redesigned to return a typed shape.
+
+/// Render a lookup outcome for the wire.
+///
+/// A total lookup failure comes back as an *error* result (the lookup really
+/// did fail — a client that read it as success would be misled) whose content
+/// is the structured `LookupFailure`, not prose. The caller branches on
+/// `suggestion` rather than parsing an HTTP string, which is the whole point:
+/// the deterministic retry work is ours, the decision to hand-build a record
+/// or stop and ask is the caller's.
+fn lookup_result(
+    r: crate::core::Result<NormalizedRecord>,
+    format: &str,
+) -> Result<CallToolResult, Error> {
+    match r {
+        Ok(rec) => {
+            let body = render_record(&rec, format)?;
+            Ok(CallToolResult::success(vec![Content::json(body)?]))
+        }
+        Err(crate::core::Error::LookupFailed(f)) => Ok(CallToolResult::error(vec![Content::json(
+            serde_json::to_value(&*f).unwrap(),
+        )?])),
+        Err(e) => Err(map_err(e)),
+    }
+}
+
 pub async fn lookup_doi_t(s: &AppState, a: DoiArgs) -> Result<CallToolResult, Error> {
-    let r = s.crossref.lookup_doi(&a.doi).await.map_err(map_err)?;
-    let body = render_record(&r, &a.format)?;
-    Ok(CallToolResult::success(vec![Content::json(body)?]))
+    lookup_result(s.crossref.lookup_doi(&a.doi).await, &a.format)
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
@@ -79,9 +101,7 @@ pub struct IsbnArgs {
 }
 
 pub async fn lookup_isbn_t(s: &AppState, a: IsbnArgs) -> Result<CallToolResult, Error> {
-    let r = s.openlibrary.lookup_isbn(&a.isbn).await.map_err(map_err)?;
-    let body = render_record(&r, &a.format)?;
-    Ok(CallToolResult::success(vec![Content::json(body)?]))
+    lookup_result(s.openlibrary.lookup_isbn(&a.isbn).await, &a.format)
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
@@ -92,9 +112,7 @@ pub struct ArxivArgs {
 }
 
 pub async fn lookup_arxiv_t(s: &AppState, a: ArxivArgs) -> Result<CallToolResult, Error> {
-    let r = s.arxiv.lookup_arxiv(&a.id).await.map_err(map_err)?;
-    let body = render_record(&r, &a.format)?;
-    Ok(CallToolResult::success(vec![Content::json(body)?]))
+    lookup_result(s.arxiv.lookup_arxiv(&a.id).await, &a.format)
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
@@ -107,29 +125,28 @@ fn ten() -> usize {
     10
 }
 
-pub async fn search_crossref_t(s: &AppState, a: SearchSourceArgs) -> Result<CallToolResult, Error> {
+pub async fn search_crossref_t(
+    s: &AppState,
+    a: SearchSourceArgs,
+) -> Result<Json<ListResult<NormalizedRecord>>, Error> {
     let r = s
         .crossref
         .search(&a.query, a.limit)
         .await
         .map_err(map_err)?;
-    Ok(CallToolResult::success(vec![Content::json(
-        serde_json::to_value(&r).unwrap(),
-    )?]))
+    Ok(Json(ListResult::with_limit(r, a.limit as i64)))
 }
 
 pub async fn search_semantic_scholar_t(
     s: &AppState,
     a: SearchSourceArgs,
-) -> Result<CallToolResult, Error> {
+) -> Result<Json<ListResult<NormalizedRecord>>, Error> {
     let r = s
         .semantic_scholar
         .search(&a.query, a.limit)
         .await
         .map_err(map_err)?;
-    Ok(CallToolResult::success(vec![Content::json(
-        serde_json::to_value(&r).unwrap(),
-    )?]))
+    Ok(Json(ListResult::with_limit(r, a.limit as i64)))
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]

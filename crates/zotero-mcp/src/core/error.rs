@@ -41,13 +41,25 @@ pub enum Error {
     #[error("pdf extraction failed: {0}")]
     Pdf(String),
 
+    /// A `lookup_*` that exhausted every attempt and identifier form. The
+    /// boxed struct is the payload the caller actually acts on — the message
+    /// here is only for humans reading a log. Boxed to keep `Error` small.
+    #[error(
+        "{source} lookup failed for {identifier} after {n} attempts ({suggestion})",
+        source = .0.source,
+        identifier = .0.identifier,
+        n = .0.attempts.len(),
+        suggestion = .0.suggestion,
+    )]
+    LookupFailed(Box<crate::core::enrichment::resilience::LookupFailure>),
+
     #[error("attachment file not found: {0}")]
     AttachmentFileNotFound(std::path::PathBuf),
 
     #[error(
-        "attachment file {file_path} is not inside the configured \
-         linked_attachment_base_dir ({base_dir}). Move it in first, or pass \
-         mode = \"imported_file\" for this call.",
+        "attachment file {file_path} is not inside the linked-attachment base \
+         directory ({base_dir}). Move it in first, or omit `mode` to let Zotero \
+         store the file the way its own UI would.",
         file_path = file_path.display(),
         base_dir = base_dir.display(),
     )]
@@ -220,7 +232,10 @@ mod tests {
         let s = e.to_string();
         assert!(s.contains("/var/tmp/x.pdf"));
         assert!(s.contains("/Users/rjl/Resilio/Zotero-Attachments"));
-        assert!(s.contains("imported_file"));
+        // The hint points at the per-call escape hatch, not at the deprecated
+        // config key (which no longer participates — v0.4.0 simplification).
+        assert!(s.contains("omit"), "{s}");
+        assert!(!s.contains("linked_attachment_base_dir"), "{s}");
     }
 
     #[test]

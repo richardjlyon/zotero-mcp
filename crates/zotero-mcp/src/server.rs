@@ -1,16 +1,23 @@
+use crate::core::dedup::FindDuplicatesResult;
+use crate::core::enrichment::propose::WeakMetadataItem;
+use crate::core::enrichment::NormalizedRecord;
 use crate::core::pdf::PdfTextResult;
-use crate::core::types::{EnrichmentProposal, Item};
+use crate::core::types::{
+    Annotation, Attachment, Collection, EnrichmentProposal, Item, SearchHit, Tag,
+};
 use crate::core::web::{RefetchResult, WebContentResult};
 use crate::state::AppState;
 use crate::tools::attachments::{
     self as att, FirstPagesArgs, ItemKeyArgs as AttachItemKey, PdfTextArgs, RefetchArgs, WebArgs,
 };
 use crate::tools::citations::{self as cit, FormatBibArgs, FormatCitationArgs};
+use crate::tools::dedup;
 use crate::tools::enrichment::{
     self as en, ApplyArgs, ArxivArgs, DoiArgs, EnrichArgs, IsbnArgs, ProposeArgs, SearchSourceArgs,
     WeakArgs,
 };
 use crate::tools::search::{self, EmptyArgs, GetItemArgs, ListTagsArgs, RecentArgs, SearchArgs};
+use crate::tools::wire::ListResult;
 use crate::tools::writes::{
     self as wr, AddNoteArgs, CollectionArgs, DeleteItemArgs, TagArgs, UpdateFieldsArgs,
 };
@@ -30,7 +37,11 @@ pub struct ZoteroServer {
     pub state: AppState,
 }
 
-#[tool_router]
+// `vis = "pub"` so tests can build the router and walk every tool's schema.
+// Building it is what validates output schemas — rmcp panics here on a schema
+// without an object root, so this is the guard against shipping a tool list
+// that a client will reject wholesale (see tests/tool_surface.rs).
+#[tool_router(vis = "pub")]
 impl ZoteroServer {
     pub fn new(state: AppState) -> Self {
         Self { state }
@@ -56,8 +67,32 @@ impl ZoteroServer {
     pub async fn search_items(
         &self,
         Parameters(args): Parameters<SearchArgs>,
-    ) -> Result<CallToolResult, McpError> {
+    ) -> Result<Json<ListResult<SearchHit>>, McpError> {
         search::search_items(&self.state, args).await
+    }
+
+    #[tool(
+        description = "Check whether a work is ALREADY in the library, before creating an item. \
+                       Call this first whenever you are about to add a reference. Runs three \
+                       passes over the local library — individual title words, author surname, \
+                       and identifier (DOI/ISBN/arXiv, in every plausible form) — unions the \
+                       results, excludes trashed items, and returns a triage per candidate. \
+                       Input: { title?, author_surname?, identifier?, input_kind: \
+                       \"pdf\"|\"url\"|\"name\", limit? }; at least one of title / \
+                       author_surname / identifier is required, and supplying both a title and \
+                       a surname catches more than either alone. The `recommendation` is one \
+                       of: \"abort\" (already there with the same kind of attachment), \
+                       \"attach_to_existing\" (the record exists but lacks your file — see \
+                       metadata_diff for what else it is missing), \"ask\" (weak match: put it \
+                       to the user), \"create_new\" (nothing found). `queries_run` reports \
+                       every query and its row count, so you can show your working.",
+        annotations(read_only_hint = true, open_world_hint = false)
+    )]
+    pub async fn find_duplicates(
+        &self,
+        Parameters(args): Parameters<dedup::FindDuplicatesArgs>,
+    ) -> Result<Json<FindDuplicatesResult>, McpError> {
+        dedup::find_duplicates_t(&self.state, args).await
     }
 
     #[tool(
@@ -78,7 +113,7 @@ impl ZoteroServer {
     pub async fn list_collections(
         &self,
         Parameters(args): Parameters<EmptyArgs>,
-    ) -> Result<CallToolResult, McpError> {
+    ) -> Result<Json<ListResult<Collection>>, McpError> {
         search::list_collections(&self.state, args).await
     }
 
@@ -89,7 +124,7 @@ impl ZoteroServer {
     pub async fn list_tags(
         &self,
         Parameters(args): Parameters<ListTagsArgs>,
-    ) -> Result<CallToolResult, McpError> {
+    ) -> Result<Json<ListResult<Tag>>, McpError> {
         search::list_tags(&self.state, args).await
     }
 
@@ -100,7 +135,7 @@ impl ZoteroServer {
     pub async fn list_recent_items(
         &self,
         Parameters(args): Parameters<RecentArgs>,
-    ) -> Result<CallToolResult, McpError> {
+    ) -> Result<Json<ListResult<SearchHit>>, McpError> {
         search::list_recent_items(&self.state, args).await
     }
 
@@ -111,7 +146,7 @@ impl ZoteroServer {
     pub async fn list_attachments(
         &self,
         Parameters(args): Parameters<AttachItemKey>,
-    ) -> Result<CallToolResult, McpError> {
+    ) -> Result<Json<ListResult<Attachment>>, McpError> {
         att::list_attachments_t(&self.state, args).await
     }
 
@@ -155,7 +190,7 @@ impl ZoteroServer {
     pub async fn list_annotations(
         &self,
         Parameters(args): Parameters<AttachItemKey>,
-    ) -> Result<CallToolResult, McpError> {
+    ) -> Result<Json<ListResult<Annotation>>, McpError> {
         att::list_annotations_t(&self.state, args).await
     }
 
@@ -355,7 +390,7 @@ impl ZoteroServer {
     }
 
     #[tool(
-        description = "Attach a local file to a Zotero parent item. Two storage modes: \"imported_file\" (bytes uploaded to Zotero's cloud and downloaded locally on each device — Zotero's default) or \"linked_file\" (Zotero stores only a path reference; the file lives wherever you put it — useful for BYO-storage setups like Resilio/Syncthing). Default mode comes from cfg.zotero.attachment_mode; per-call override allowed. For linked_file, the file must be under cfg.zotero.linked_attachment_base_dir. Input: { parent_key, file_path (absolute), mode?, filename?, content_type? }. Returns { attachment_key }.",
+        description = "Attach a local file to a Zotero parent item. The file is stored the way Zotero's own UI would store it, and the user's Zotero file-sync preference (cloud, WebDAV, or none) decides where the bytes travel from there — that is not this server's decision to make. Input: { parent_key, file_path (absolute), mode?, filename?, content_type? }. `mode` is an advanced escape hatch: omit it. Pass \"linked_file\" only if the user specifically wants Zotero to store a path reference instead of the file (BYO-storage setups like a Calibre mirror or a shared NAS). Returns { attachment_key }.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -377,7 +412,7 @@ impl ZoteroServer {
     pub async fn find_weak_metadata_items(
         &self,
         Parameters(args): Parameters<WeakArgs>,
-    ) -> Result<CallToolResult, McpError> {
+    ) -> Result<Json<ListResult<WeakMetadataItem>>, McpError> {
         en::find_weak_metadata_items_t(&self.state, args).await
     }
 
@@ -427,7 +462,7 @@ impl ZoteroServer {
     pub async fn search_crossref(
         &self,
         Parameters(args): Parameters<SearchSourceArgs>,
-    ) -> Result<CallToolResult, McpError> {
+    ) -> Result<Json<ListResult<NormalizedRecord>>, McpError> {
         en::search_crossref_t(&self.state, args).await
     }
 
@@ -438,7 +473,7 @@ impl ZoteroServer {
     pub async fn search_semantic_scholar(
         &self,
         Parameters(args): Parameters<SearchSourceArgs>,
-    ) -> Result<CallToolResult, McpError> {
+    ) -> Result<Json<ListResult<NormalizedRecord>>, McpError> {
         en::search_semantic_scholar_t(&self.state, args).await
     }
 
@@ -605,7 +640,24 @@ mod tests {
             .output_schema
             .is_some());
 
-        // Content::text tools and Vec-returning tools (left on CallToolResult) don't get output schemas.
+        // The nine list-returning tools now carry schemas too, via the
+        // ListResult<T> envelope. Their bare-Vec shape could not be advertised:
+        // MCP requires an object at the root of an output schema, and schemars
+        // renders Vec<T> as type:array. This assertion replaces the inverse one
+        // that guarded them while the wire-format question was open — Richard
+        // settled it on 2026-07-25 (docs/superpowers/specs/
+        // 2026-07-25-slice-g-wire-format-decision.md).
+        assert!(ZoteroServer::search_items_tool_attr()
+            .output_schema
+            .is_some());
+        assert!(ZoteroServer::list_collections_tool_attr()
+            .output_schema
+            .is_some());
+        assert!(ZoteroServer::find_weak_metadata_items_tool_attr()
+            .output_schema
+            .is_some());
+
+        // Text-returning tools still have none — deliberately bare strings.
         assert!(ZoteroServer::format_citation_tool_attr()
             .output_schema
             .is_none());
@@ -613,17 +665,15 @@ mod tests {
         assert!(ZoteroServer::delete_item_tool_attr()
             .output_schema
             .is_none());
-        // search_items + list_collections: Vec-returning tools deferred in Slice G.
-        // MCP spec requires outputSchema root to be type:object; schemars renders Vec<T>
-        // as type:array, which rmcp 1.7 rejects at server startup. Wrapping in an
-        // envelope struct (XxxResult { items: Vec<T> }) satisfies the schema but breaks
-        // content[0].text wire format from [...] to {"items":[...]}. These asserts
-        // guard against an accidental future migration that doesn't address the wire
-        // question.
-        assert!(ZoteroServer::search_items_tool_attr()
+
+        // The three lookup tools stay untyped by decision, not by deferral: the
+        // schema they would gain says only "an object", while migrating would
+        // push their structured lookup_failed body out of tool content.
+        assert!(ZoteroServer::lookup_doi_tool_attr().output_schema.is_none());
+        assert!(ZoteroServer::lookup_isbn_tool_attr()
             .output_schema
             .is_none());
-        assert!(ZoteroServer::list_collections_tool_attr()
+        assert!(ZoteroServer::lookup_arxiv_tool_attr()
             .output_schema
             .is_none());
     }

@@ -68,9 +68,9 @@ pub enum AttachmentMode {
 }
 
 impl AttachmentMode {
-    /// Parse from the config string. Returns `ImportedFile` for unknown values
-    /// with a warn-level log; this matches the "graceful default" stance of
-    /// the rest of the config layer.
+    /// Parse the per-call `mode` string passed to `attach_file`. Returns
+    /// `ImportedFile` for unknown values with a warn-level log, rather than
+    /// erroring — a bad `mode` should not cost the caller the attachment.
     pub fn from_config(s: &str) -> Self {
         match s {
             "linked_file" => AttachmentMode::LinkedFile,
@@ -78,7 +78,7 @@ impl AttachmentMode {
             other => {
                 tracing::warn!(
                     value = other,
-                    "unknown attachment_mode in config; falling back to imported_file"
+                    "unknown attach_file mode; falling back to imported_file"
                 );
                 AttachmentMode::ImportedFile
             }
@@ -93,6 +93,10 @@ pub struct AttachFileOptions {
     /// When `mode` is `LinkedFile`, files must be inside this directory.
     /// The stored path uses Zotero's `attachments:<relative>` prefix so it
     /// can be resolved on any device that has the same base dir configured.
+    ///
+    /// The MCP tool layer always passes `None` here (there is no config key
+    /// for it as of v0.4.0), in which case a `LinkedFile` attachment stores
+    /// the file's absolute path. Only direct callers of this function set it.
     pub linked_attachment_base_dir: Option<PathBuf>,
     /// Required for `ImportedFile` mode: Zotero's resolved `storage/` directory
     /// (typically `~/Zotero/storage`). `attach_file` drops bytes at
@@ -112,10 +116,14 @@ pub struct AttachFileOptions {
 
 /// Attach a local file to a Zotero parent item.
 ///
-/// `mode` selects between Zotero's `imported_file` (bytes uploaded to
-/// Zotero's cloud) and `linked_file` (path reference only). Pre-flight
-/// validation (file exists, size ≤ max_attachment_bytes, base-dir
-/// relativity for linked_file) happens before any network call.
+/// `mode` selects between Zotero's `imported_file` — bytes into
+/// `<storage_dir>/<key>/<filename>`, exactly what Zotero's own UI produces,
+/// with the desktop client's sync engine deciding where they travel — and
+/// `linked_file` (path reference only). `ImportedFile` is what an
+/// `attach_file` MCP call with no `mode` argument resolves to; there is no
+/// config-driven default. Pre-flight validation (file exists, size ≤
+/// max_attachment_bytes, base-dir relativity for linked_file) happens before
+/// any network call.
 pub async fn attach_file(
     api: &LocalApi,
     parent_key: &str,
@@ -193,7 +201,7 @@ async fn attach_file_linked(
         None => {
             tracing::warn!(
                 file = %file_path.display(),
-                "linked_attachment_base_dir not configured; storing absolute path. \
+                "no linked-attachment base directory supplied; storing absolute path. \
                  File will not replicate to other Zotero clients."
             );
             file_path.display().to_string()

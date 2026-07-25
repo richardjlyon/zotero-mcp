@@ -11,7 +11,8 @@
 //! ```
 //!
 //! The test creates a junk journalArticle in the named collection, attaches
-//! a tiny PDF (imported_file mode), attaches a URL, verifies via list calls,
+//! a tiny PDF (the default route — stored the way Zotero's UI would store
+//! it), attaches a URL, verifies via list calls,
 //! then deletes the parent (Zotero auto-trashes children).
 //!
 //! Marked `#[ignore]` so it doesn't run by default. The Definition of Done
@@ -66,7 +67,8 @@ async fn live_create_item_attach_file_attach_link_roundtrip() {
         .unwrap();
     println!("created parent: {parent_key}");
 
-    // Step 2: attach_file (imported_file). Uses the committed hello.pdf fixture.
+    // Step 2: attach_file on the default route — what `attach_file` with no
+    // `mode` argument resolves to. Uses the committed hello.pdf fixture.
     // Live test writes into the user's actual ~/Zotero/storage so Zotero
     // desktop picks up the bytes via its normal sync engine.
     let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/hello.pdf");
@@ -185,7 +187,8 @@ async fn live_attach_file_linked_file_roundtrip() {
         .await
         .unwrap();
 
-    // Step 2: linked_file attach.
+    // Step 2: linked_file attach — the escape hatch, still supported. Only a
+    // direct core-API caller supplies a base dir; the MCP tool layer never does.
     let opts = AttachFileOptions {
         mode: AttachmentMode::LinkedFile,
         linked_attachment_base_dir: Some(dir.path().to_path_buf()),
