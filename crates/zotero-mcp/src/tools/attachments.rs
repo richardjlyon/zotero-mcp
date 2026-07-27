@@ -1,4 +1,8 @@
-use crate::core::pdf::{get_pdf_first_pages, get_pdf_text, PdfTextResult};
+use crate::core::derivatives::{DerivativeStatus, DerivativeStore};
+use crate::core::pdf::{
+    attachment_key_for, get_pdf_first_pages_stored, get_pdf_text_stored, is_layout_faithful,
+    PdfTextResult,
+};
 use crate::core::reader::annotations::list_annotations;
 use crate::core::reader::attachments::{list_attachments, resolve_path};
 use crate::core::types::{Annotation, Attachment};
@@ -74,6 +78,12 @@ pub struct PdfTextArgs {
     /// Last page to extract (1-indexed, inclusive). See `from_page`.
     #[serde(default)]
     pub to_page: Option<u32>,
+    /// Re-extract even when a stored derivative is current, replacing it.
+    /// Normally unnecessary: a changed PDF or a bumped extraction profile
+    /// invalidates the stored copy automatically. Use when you suspect the
+    /// stored text is wrong rather than merely old.
+    #[serde(default)]
+    pub refresh: bool,
 }
 
 /// Build an optional `(from, to)` window from the two optional page args.
@@ -92,17 +102,266 @@ fn page_window(from: Option<u32>, to: Option<u32>) -> Option<(u32, u32)> {
 }
 
 pub async fn get_pdf_text_t(s: &AppState, a: PdfTextArgs) -> Result<Json<PdfTextResult>, Error> {
-    let r = get_pdf_text(
+    let r = get_pdf_text_stored(
         &s.pool,
         &a.item_key,
         1,
         &s.cfg.storage_dir(),
         &s.pdf_engines,
+        &s.derivatives,
         a.plain,
         page_window(a.from_page, a.to_page),
+        a.refresh,
     )
     .await
     .map_err(map_err)?;
+    Ok(Json(r))
+}
+
+/// Where a stored derivative lives and what state it is in — without the
+/// document's text.
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct DerivativePathResult {
+    /// `present`, `absent`, `failed`, or `no_pdf`.
+    pub status: String,
+    /// Path to the markdown **on the machine running this server**. Present
+    /// whenever the item has a PDF, whether or not the derivative is built
+    /// yet — pair it with `status`. When you reach this server over HTTP this
+    /// path is not on your own filesystem.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// Path to the source PDF, likewise server-local.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pdf_path: Option<String>,
+    /// Engine that produced the stored bytes (not the engine that would run
+    /// now — a derivative may be days old).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub engine: Option<String>,
+    /// Extraction profile the stored bytes were produced under.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_pages: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub character_count: Option<usize>,
+    /// Why the last build failed, when `status` is `failed`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+/// Return the path to an item's stored text derivative without returning the
+/// text. The point is cost: a 69-page report is ~250,000 characters, and
+/// handing a path to a tool or a person should not cost the document.
+pub async fn get_derivative_path_t(
+    s: &AppState,
+    a: ItemKeyArgs,
+) -> Result<Json<DerivativePathResult>, Error> {
+    let pdf_path = match resolve_path(&s.pool, &a.item_key, 1, &s.cfg.storage_dir()).await {
+        Ok(p) => p,
+        // No PDF is a state, not an error: it is the difference between "not
+        // extracted yet" and "nothing to extract".
+        Err(_) => {
+            return Ok(Json(DerivativePathResult {
+                status: "no_pdf".into(),
+                path: None,
+                pdf_path: None,
+                engine: None,
+                profile: None,
+                total_pages: None,
+                character_count: None,
+                detail: Some(format!("item {} has no PDF attachment", a.item_key)),
+            }))
+        }
+    };
+    let Some(att_key) = attachment_key_for(&pdf_path) else {
+        return Err(map_err(crate::core::error::Error::AttachmentNotFound(
+            a.item_key.clone(),
+        )));
+    };
+    let hash = DerivativeStore::content_hash(&pdf_path)
+        .await
+        .map_err(map_err)?;
+    let path = Some(
+        s.derivatives
+            .path_for(&att_key, &hash)
+            .to_string_lossy()
+            .into_owned(),
+    );
+    let pdf = Some(pdf_path.to_string_lossy().into_owned());
+
+    Ok(Json(match s.derivatives.status(&att_key, &hash).await {
+        DerivativeStatus::Present => {
+            let hit = s.derivatives.get(&att_key, &hash).await;
+            let meta = hit.map(|h| h.meta);
+            DerivativePathResult {
+                status: "present".into(),
+                path,
+                pdf_path: pdf,
+                engine: meta.as_ref().map(|m| format!("{:?}", m.engine)),
+                profile: meta.as_ref().map(|m| m.profile.clone()),
+                total_pages: meta.as_ref().map(|m| m.completeness.total_pages),
+                character_count: meta.as_ref().map(|m| m.character_count),
+                detail: None,
+            }
+        }
+        DerivativeStatus::Failed(reason) => DerivativePathResult {
+            status: "failed".into(),
+            path,
+            pdf_path: pdf,
+            engine: None,
+            profile: None,
+            total_pages: None,
+            character_count: None,
+            detail: Some(reason),
+        },
+        DerivativeStatus::Absent => DerivativePathResult {
+            status: "absent".into(),
+            path,
+            pdf_path: pdf,
+            engine: None,
+            profile: None,
+            total_pages: None,
+            character_count: None,
+            detail: Some(
+                "no derivative built yet — read the item's text once, or run \
+                 build_derivatives, to create it"
+                    .into(),
+            ),
+        },
+    }))
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct BuildDerivativesArgs {
+    /// Item keys to build derivatives for.
+    pub item_keys: Vec<String>,
+    /// Rebuild even when a current derivative exists.
+    #[serde(default)]
+    pub refresh: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct DerivativeOutcome {
+    pub item_key: String,
+    /// `stored`, `already_present`, `no_pdf`, `not_layout_faithful`, or `failed`.
+    pub outcome: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct BuildDerivativesResult {
+    pub stored: usize,
+    pub already_present: usize,
+    pub skipped_no_pdf: usize,
+    pub failed: usize,
+    /// One entry per item, in the order given. Statuses only — never text, so
+    /// the response stays inside the transport's size ceiling however many
+    /// items were processed.
+    pub outcomes: Vec<DerivativeOutcome>,
+}
+
+/// Backfill: give a set of items durable text derivatives.
+///
+/// Issues **no** Zotero writes — the store is server-owned — so item metadata,
+/// hand-written `extra` fields, tags, collections and notes cannot be touched
+/// by this. Resumable: items that already have a current derivative are
+/// reported and skipped rather than re-extracted.
+pub async fn build_derivatives_t(
+    s: &AppState,
+    a: BuildDerivativesArgs,
+) -> Result<Json<BuildDerivativesResult>, Error> {
+    let mut r = BuildDerivativesResult {
+        stored: 0,
+        already_present: 0,
+        skipped_no_pdf: 0,
+        failed: 0,
+        outcomes: Vec::with_capacity(a.item_keys.len()),
+    };
+    for key in &a.item_keys {
+        let pdf_path = match resolve_path(&s.pool, key, 1, &s.cfg.storage_dir()).await {
+            Ok(p) => p,
+            Err(_) => {
+                r.skipped_no_pdf += 1;
+                r.outcomes.push(DerivativeOutcome {
+                    item_key: key.clone(),
+                    outcome: "no_pdf".into(),
+                    detail: Some("item has no PDF attachment".into()),
+                });
+                continue;
+            }
+        };
+        let hash = match DerivativeStore::content_hash(&pdf_path).await {
+            Ok(h) => h,
+            Err(e) => {
+                r.failed += 1;
+                r.outcomes.push(DerivativeOutcome {
+                    item_key: key.clone(),
+                    outcome: "failed".into(),
+                    detail: Some(e.to_string()),
+                });
+                continue;
+            }
+        };
+        let att_key = attachment_key_for(&pdf_path).unwrap_or_default();
+        if !a.refresh
+            && matches!(
+                s.derivatives.status(&att_key, &hash).await,
+                DerivativeStatus::Present
+            )
+        {
+            r.already_present += 1;
+            r.outcomes.push(DerivativeOutcome {
+                item_key: key.clone(),
+                outcome: "already_present".into(),
+                detail: None,
+            });
+            continue;
+        }
+        match get_pdf_text_stored(
+            &s.pool,
+            key,
+            1,
+            &s.cfg.storage_dir(),
+            &s.pdf_engines,
+            &s.derivatives,
+            false,
+            None,
+            a.refresh,
+        )
+        .await
+        {
+            Ok(res) if is_layout_faithful(&res) => {
+                r.stored += 1;
+                r.outcomes.push(DerivativeOutcome {
+                    item_key: key.clone(),
+                    outcome: "stored".into(),
+                    detail: None,
+                });
+            }
+            Ok(res) => {
+                // Extraction worked but on a flat engine: nothing is stored,
+                // because a lossy artefact must never become the permanent one.
+                r.failed += 1;
+                r.outcomes.push(DerivativeOutcome {
+                    item_key: key.clone(),
+                    outcome: "not_layout_faithful".into(),
+                    detail: Some(format!(
+                        "extracted via {:?}, which cannot express tables; nothing stored",
+                        res.source
+                    )),
+                });
+            }
+            Err(e) => {
+                r.failed += 1;
+                r.outcomes.push(DerivativeOutcome {
+                    item_key: key.clone(),
+                    outcome: "failed".into(),
+                    detail: Some(e.to_string()),
+                });
+            }
+        }
+    }
     Ok(Json(r))
 }
 
@@ -124,13 +383,14 @@ pub async fn get_pdf_first_pages_t(
     s: &AppState,
     a: FirstPagesArgs,
 ) -> Result<Json<PdfTextResult>, Error> {
-    let r = get_pdf_first_pages(
+    let r = get_pdf_first_pages_stored(
         &s.pool,
         &a.item_key,
         1,
         &s.cfg.storage_dir(),
         a.n,
         &s.pdf_engines,
+        &s.derivatives,
         a.plain,
     )
     .await

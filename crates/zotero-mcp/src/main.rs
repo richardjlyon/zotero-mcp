@@ -83,94 +83,60 @@ async fn run_pdf_text(
     window_size: u32,
 ) -> anyhow::Result<()> {
     use std::io::Write;
-    use zcore::error::Error as ZError;
-    use zcore::pdf::get_pdf_text;
+    use zcore::pdf::{get_pdf_text_stored, ServedFrom};
 
     let cfg = zcore::Config::load().unwrap_or_default();
     // Logging goes to the log dir (never stdout), so stdout stays pure text.
     logging::init(&cfg.logging.level, Some(&cfg.resolved_log_dir()))?;
     let state = state::AppState::build(cfg).await?;
     let storage = state.cfg.storage_dir();
-    let window_size = window_size.max(1);
+    let _ = window_size; // window walking is now internal to the store builder
 
     let header = |r: &zcore::pdf::PdfTextResult, span: &str| {
         eprintln!(
-            "[pdf-text {item_key} | route: {:?} | pages: {} | total: {} | complete: {} | {span}]",
-            r.source, r.completeness.pages, r.completeness.total_pages, r.completeness.complete
+            "[pdf-text {item_key} | route: {:?} | served: {} | pages: {} | total: {} | complete: {} | {span}]",
+            r.source,
+            match r.served_from {
+                ServedFrom::Store => "store",
+                ServedFrom::Fresh => "fresh",
+            },
+            r.completeness.pages,
+            r.completeness.total_pages,
+            r.completeness.complete
         );
     };
 
-    // Explicit window: one call, print it.
-    if from.is_some() || to.is_some() {
-        let f = from.unwrap_or(1).max(1);
-        let t = to.unwrap_or(f).max(f);
-        let r = get_pdf_text(
-            &state.pool,
-            &item_key,
-            1,
-            &storage,
-            &state.pdf_engines,
-            plain,
-            Some((f, t)),
-        )
-        .await?;
-        header(&r, &format!("window {f}..={t}"));
-        print!("{}", r.text);
-        std::io::stdout().flush().ok();
-        return Ok(());
-    }
-
-    // Whole document; on the large-document guard, walk windows and stream.
-    match get_pdf_text(
+    // Explicit window, or the whole document. Either way the store is
+    // consulted first and the walk over a large document happens inside
+    // `get_pdf_text_stored`, so this command no longer orchestrates windows
+    // itself — and a second run of it costs nothing.
+    let window = match (from, to) {
+        (None, None) => None,
+        (f, t) => {
+            let f = f.unwrap_or(1).max(1);
+            Some((f, t.unwrap_or(f).max(f)))
+        }
+    };
+    let r = get_pdf_text_stored(
         &state.pool,
         &item_key,
         1,
         &storage,
         &state.pdf_engines,
+        &state.derivatives,
         plain,
-        None,
+        window,
+        false,
     )
-    .await
-    {
-        Ok(r) => {
-            header(&r, "whole document");
-            print!("{}", r.text);
-        }
-        Err(ZError::PdfDocumentTooLarge { pages, .. }) => {
-            eprintln!(
-                "[pdf-text {item_key} | {pages} pages exceed the whole-document limit; \
-                 walking {window_size}-page windows]"
-            );
-            let mut start = 1u32;
-            let mut out = String::new();
-            while start <= pages {
-                let end = (start + window_size - 1).min(pages);
-                let r = get_pdf_text(
-                    &state.pool,
-                    &item_key,
-                    1,
-                    &storage,
-                    &state.pdf_engines,
-                    plain,
-                    Some((start, end)),
-                )
-                .await?;
-                eprintln!(
-                    "[pdf-text {item_key} | window {start}..={end} of {pages} | route: {:?} | \
-                     complete: {}]",
-                    r.source, r.completeness.complete
-                );
-                if !out.is_empty() {
-                    out.push_str("\n\n");
-                }
-                out.push_str(r.text.trim_end());
-                start = end + 1;
-            }
-            out.push('\n');
-            print!("{out}");
-        }
-        Err(e) => return Err(e.into()),
-    }
+    .await?;
+    header(
+        &r,
+        &match window {
+            Some((f, t)) => format!("window {f}..={t}"),
+            None => "whole document".to_string(),
+        },
+    );
+    print!("{}", r.text);
     std::io::stdout().flush().ok();
     Ok(())
 }

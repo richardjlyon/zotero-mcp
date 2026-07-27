@@ -15,7 +15,7 @@ use zotero_mcp::server::ZoteroServer;
 
 /// Update deliberately when adding or removing a tool — a change here should be
 /// a decision, not a surprise.
-const EXPECTED_TOOL_COUNT: usize = 35;
+const EXPECTED_TOOL_COUNT: usize = 37;
 
 fn all_tools() -> Vec<rmcp::model::Tool> {
     // Constructing the router is the operation that validates output schemas.
@@ -78,6 +78,36 @@ fn every_tool_is_described_and_annotated() {
     }
 }
 
+/// The search tool must state what its full-text option actually covers.
+/// A caller who reads a miss as "not in the document" will report absence for
+/// content that is present — the failure this contract exists to prevent — so
+/// the three real limits are asserted, not left to prose drift.
+#[test]
+fn search_tool_states_its_fulltext_coverage() {
+    let tools = all_tools();
+    let search = tools
+        .iter()
+        .find(|t| t.name == "search_items")
+        .expect("search_items must exist");
+    let d = search.description.as_deref().unwrap_or_default().to_lowercase();
+    assert!(
+        d.contains("zotero's own"),
+        "must say whose index is searched"
+    );
+    assert!(
+        d.contains("derivative"),
+        "must say stored derivatives are not searched"
+    );
+    assert!(
+        d.contains("single-word"),
+        "must say multi-word queries drop full-text matching"
+    );
+    assert!(
+        d.contains("parent item"),
+        "must say matching resolves through parent items"
+    );
+}
+
 #[test]
 fn tool_count_and_key_names_are_stable() {
     let tools = all_tools();
@@ -96,6 +126,8 @@ fn tool_count_and_key_names_are_stable() {
         "attach_file",
         "lookup_isbn",
         "get_pdf_text",
+        "get_derivative_path",
+        "build_derivatives",
     ] {
         assert!(
             tools.iter().any(|t| t.name == name),

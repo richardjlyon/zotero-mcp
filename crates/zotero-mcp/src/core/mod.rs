@@ -5,6 +5,7 @@ pub mod cache;
 pub mod citations;
 pub mod config;
 pub mod dedup;
+pub mod derivatives;
 pub mod enrichment;
 pub mod error;
 pub mod identifier;

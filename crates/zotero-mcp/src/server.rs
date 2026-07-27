@@ -61,7 +61,7 @@ impl ZoteroServer {
     }
 
     #[tool(
-        description = "Search the local Zotero library (metadata + optional fulltext).",
+        description = "Search the local Zotero library (metadata + optional fulltext). FULL-TEXT COVERAGE — read this before treating a miss as evidence of absence. The index searched is Zotero's own, built by Zotero's indexer; this server never writes it, and it does NOT cover the layout-aware markdown derivatives that get_pdf_text stores, so a term that appears only inside a table may be in the document and not in the index. The full-text clause applies to single-word queries only: a query containing whitespace is matched against metadata alone, with full-text matching dropped entirely rather than degraded. Matching resolves through parent items, so a top-level attachment with no parent is never returned by a full-text match. A negative result therefore means 'not found in Zotero's flat word index for a single-word query on a parented item' — not 'not in the document'. To search a document's real content, read its text with get_pdf_text.",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
     pub async fn search_items(
@@ -162,7 +162,7 @@ impl ZoteroServer {
     }
 
     #[tool(
-        description = "Read full extracted PDF text for an item. Primary route: the layout-aware Docling service — markdown output with real tables, `--- p.N ---` page anchors, and formulas decoded to LaTeX; scanned (image-only) PDFs get an ocrmypdf OCR pre-step. Falls back to the flat-text chain (.zotero-ft-cache → pdf-extract → pdftotext) when the service is unreachable; `source` identifies which engine produced the text. Every result carries a machine-readable `completeness` report (pages, per-page chars, undecoded formulas, untranscribed images, OCR'd pages, low-text pages): trust presence in the text, but treat absence on pages with declared drops as unknown — never as 'not in the document'. Set `plain=true` to force the old flat-text output. Fails loudly when no route can extract text; never returns empty text as success.",
+        description = "Read full extracted PDF text for an item. Primary route: the layout-aware Docling service — markdown output with real tables, `--- p.N ---` page anchors, and formulas decoded to LaTeX; scanned (image-only) PDFs get an ocrmypdf OCR pre-step. Falls back to the flat-text chain (.zotero-ft-cache → pdf-extract → pdftotext) when the service is unreachable; `source` identifies which engine produced the text. Layout-faithful extractions are stored durably and served back on later reads, so the expensive work happens once per PDF rather than once per reader: `served_from` says `store` or `fresh`, and a stored copy is reused until the PDF's content or the extraction profile changes (`refresh=true` forces a rebuild). Flat-text output is never stored. Every result carries a machine-readable `completeness` report (pages, per-page chars, undecoded formulas, untranscribed images, OCR'd pages, low-text pages): trust presence in the text, but treat absence on pages with declared drops as unknown — never as 'not in the document'. Set `plain=true` to force the old flat-text output. Fails loudly when no route can extract text; never returns empty text as success.",
         annotations(read_only_hint = true, open_world_hint = true)
     )]
     pub async fn get_pdf_text(
@@ -181,6 +181,28 @@ impl ZoteroServer {
         Parameters(args): Parameters<FirstPagesArgs>,
     ) -> Result<Json<PdfTextResult>, McpError> {
         att::get_pdf_first_pages_t(&self.state, args).await
+    }
+
+    #[tool(
+        description = "Get the filesystem path of an item's stored PDF text derivative — the markdown produced by the layout-aware route — WITHOUT returning the text. Use this to hand a whole document to another tool, a script or a person: the response size is the same for a 2-page paper and a 69-page report, so it does not cost the document's tokens. `status` is `present`, `absent` (nothing built yet — read the text once, or run build_derivatives), `failed` (a build was attempted and the reason is in `detail`), or `no_pdf`. IMPORTANT: paths are on the machine running this server. If you are connected over HTTP rather than stdio, the path will not exist on your own filesystem.",
+        annotations(read_only_hint = true, open_world_hint = false)
+    )]
+    pub async fn get_derivative_path(
+        &self,
+        Parameters(args): Parameters<AttachItemKey>,
+    ) -> Result<Json<att::DerivativePathResult>, McpError> {
+        att::get_derivative_path_t(&self.state, args).await
+    }
+
+    #[tool(
+        description = "Build durable text derivatives for a set of items (backfill). Extracts each item's PDF once via the layout-aware route and stores the markdown, so later reads of those items are served from storage instead of re-extracting. Writes NOTHING to your Zotero library — item metadata, `extra` fields, tags, collections and notes are untouched — because the store is server-owned and lives outside the Zotero tree. Resumable: items that already have a current derivative are reported as `already_present` and skipped. Returns per-item outcomes (`stored`, `already_present`, `no_pdf`, `not_layout_faithful`, `failed`) and counts only, never text. Items whose extraction falls back to a flat-text engine are reported `not_layout_faithful` and nothing is stored for them, since flat text cannot express tables.",
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = true)
+    )]
+    pub async fn build_derivatives(
+        &self,
+        Parameters(args): Parameters<att::BuildDerivativesArgs>,
+    ) -> Result<Json<att::BuildDerivativesResult>, McpError> {
+        att::build_derivatives_t(&self.state, args).await
     }
 
     #[tool(

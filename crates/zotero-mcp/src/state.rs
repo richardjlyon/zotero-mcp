@@ -1,6 +1,7 @@
 use crate::core::bbt::BbtClient;
 use crate::core::cache::DiskCache;
 use crate::core::config::Config;
+use crate::core::derivatives::DerivativeStore;
 use crate::core::enrichment::arxiv::ArxivClient;
 use crate::core::enrichment::crossref::CrossrefClient;
 use crate::core::enrichment::openlibrary::OpenLibraryClient;
@@ -20,6 +21,9 @@ pub struct AppState {
     pub arxiv: ArxivClient,
     pub semantic_scholar: SemanticScholarClient,
     pub pdf_engines: Arc<crate::core::pdf::PdfEngines>,
+    /// Durable store for layout-faithful PDF text derivatives. Server-owned
+    /// and outside the Zotero tree; see [`crate::core::derivatives`].
+    pub derivatives: Arc<DerivativeStore>,
 }
 
 impl AppState {
@@ -60,6 +64,7 @@ impl AppState {
             SemanticScholarClient::new("https://api.semanticscholar.org", cache, &ua, None);
 
         let pdf_engines = Arc::new(crate::core::pdf::PdfEngines::build(&cfg.zotero));
+        let derivatives = Arc::new(DerivativeStore::new(cfg.resolved_derivatives_dir()));
 
         Ok(Self {
             cfg,
@@ -71,6 +76,7 @@ impl AppState {
             arxiv,
             semantic_scholar,
             pdf_engines,
+            derivatives,
         })
     }
 }

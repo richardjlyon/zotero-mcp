@@ -1,3 +1,6 @@
+use crate::core::derivatives::{
+    DerivativeMeta, DerivativeStore, StoredDerivative, EXTRACTION_PROFILE,
+};
 use crate::core::error::{Error, Result};
 use crate::core::reader::attachments::resolve_path;
 use crate::core::reader::pool::ReadOnlyPool;
@@ -242,6 +245,29 @@ pub struct PdfTextResult {
     pub format: PdfFormat,
     pub page_anchors: bool,
     pub completeness: Completeness,
+    /// Whether this text was extracted now or served from the durable
+    /// derivative store. A caller watching cost or reproducibility needs to
+    /// know which; defaults to `Fresh` so results built before this field
+    /// existed deserialise unchanged.
+    #[serde(default)]
+    pub served_from: ServedFrom,
+    /// The extraction profile that produced the *bytes* — set only on a store
+    /// hit, where the producing run may be days old. `None` on a fresh
+    /// extraction, whose profile is by definition the current one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+}
+
+/// Provenance of the text in a [`PdfTextResult`]: extracted during this call,
+/// or read back from the derivative store.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ServedFrom {
+    /// Extracted during this call — a layout convert and/or OCR ran.
+    #[default]
+    Fresh,
+    /// Read from the durable derivative store; no engine was contacted.
+    Store,
 }
 
 /// A PDF text extraction engine. Implementors are stateless and reusable.
@@ -1106,6 +1132,235 @@ pub async fn get_pdf_text(
     extract_windowed(&pdf_path, &storage_item_dir, engines, plain, window).await
 }
 
+/// The Zotero attachment key owning a stored file: Zotero lays storage out as
+/// `storage/<ATTACHMENTKEY>/<filename>`, so the parent directory name *is* the
+/// key. Used to key derivatives to the attachment rather than to the parent
+/// item, so replacing one PDF on a multi-attachment item invalidates only its
+/// own derivative.
+pub fn attachment_key_for(pdf_path: &Path) -> Option<String> {
+    pdf_path
+        .parent()?
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+}
+
+/// Serve a page window out of already-extracted, page-anchored text.
+///
+/// A stored whole-document derivative answers window requests directly: the
+/// pages are already there under their true anchors, so re-running Docling to
+/// return a subset of what we hold would be pure waste.
+fn window_from_stored(stored: &PdfTextResult, from: u32, to: u32) -> Option<PdfTextResult> {
+    if !stored.page_anchors {
+        return None;
+    }
+    let pages = split_anchored_pages(&stored.text);
+    if pages.is_empty() {
+        return None;
+    }
+    let kept: Vec<&(u32, String)> = pages.iter().filter(|(n, _)| *n >= from && *n <= to).collect();
+    if kept.is_empty() {
+        return None;
+    }
+    let mut text = String::new();
+    for (n, body) in &kept {
+        text.push_str(&format!("--- p.{n} ---\n"));
+        text.push_str(body);
+    }
+    let retained: Vec<u32> = kept.iter().map(|(n, _)| *n).collect();
+    let mut c = stored.completeness.clone();
+    c.pages = retained.len() as u32;
+    // The drop vectors and per-page counts must describe the window, not the
+    // document: a caller reading a clean window of a document with drops
+    // elsewhere should not be told this window has them.
+    let index: std::collections::HashMap<u32, usize> = pages
+        .iter()
+        .enumerate()
+        .map(|(i, (n, _))| (*n, i))
+        .collect();
+    c.per_page_chars = retained
+        .iter()
+        .filter_map(|n| index.get(n).and_then(|i| c.per_page_chars.get(*i).copied()))
+        .collect();
+    c.undecoded_formulas.retain(|p| retained.contains(p));
+    c.untranscribed_images.retain(|p| retained.contains(p));
+    c.ocr_pages.retain(|p| retained.contains(p));
+    c.low_text_pages.retain(|p| retained.contains(p));
+    c.notes.push(format!(
+        "page window {from}..={to} of {} total pages, served from the stored \
+         derivative; this report describes only these pages",
+        c.total_pages
+    ));
+    let n = text.chars().count();
+    Some(PdfTextResult {
+        text,
+        source: stored.source,
+        character_count: n,
+        format: stored.format,
+        page_anchors: true,
+        completeness: c,
+        served_from: ServedFrom::Store,
+        profile: stored.profile.clone(),
+    })
+}
+
+/// Store-aware text extraction: the entry point every tool and the CLI use.
+///
+/// Consults the durable derivative store first and extracts only on a miss, so
+/// the expensive work happens once per (PDF content, profile) rather than once
+/// per reader. Behaviour on a miss is exactly what it was before the store
+/// existed, so nothing about how callers invoke this changes.
+///
+/// `plain` bypasses the store in both directions: a caller asking for flat
+/// output has deliberately asked for something the store must never hold.
+// Mirrors `get_pdf_text`'s parameter list plus the store, the plain flag and
+// the refresh flag. Grouping them into a struct would churn every call site
+// for no gain in clarity at the call.
+#[allow(clippy::too_many_arguments)]
+pub async fn get_pdf_text_stored(
+    pool: &ReadOnlyPool,
+    parent_key: &str,
+    library_id: i64,
+    storage_dir: &Path,
+    engines: &PdfEngines,
+    store: &DerivativeStore,
+    plain: bool,
+    window: Option<(u32, u32)>,
+    refresh: bool,
+) -> Result<PdfTextResult> {
+    if plain {
+        return get_pdf_text(
+            pool, parent_key, library_id, storage_dir, engines, true, window,
+        )
+        .await;
+    }
+    let pdf_path = resolve_path(pool, parent_key, library_id, storage_dir).await?;
+    let storage_item_dir = pdf_path
+        .parent()
+        .ok_or_else(|| Error::AttachmentNotFound(parent_key.into()))?
+        .to_path_buf();
+    let Some(att_key) = attachment_key_for(&pdf_path) else {
+        return extract_windowed(&pdf_path, &storage_item_dir, engines, plain, window).await;
+    };
+    let hash = DerivativeStore::content_hash(&pdf_path).await?;
+
+    if !refresh {
+        if let Some(hit) = store.get(&att_key, &hash).await {
+            let stored = stored_to_result(&hit);
+            match window {
+                None => return Ok(stored),
+                Some((from, to)) => {
+                    if let Some(w) = window_from_stored(&stored, from, to) {
+                        return Ok(w);
+                    }
+                }
+            }
+        }
+    }
+
+    // A window request is a bounded read, not a reason to build (and pay for)
+    // the whole document: extract just the window and store nothing.
+    if let Some((from, to)) = window {
+        return extract_windowed(
+            &pdf_path,
+            &storage_item_dir,
+            engines,
+            plain,
+            Some((from, to)),
+        )
+        .await;
+    }
+
+    let built =
+        build_whole_document(&pdf_path, &storage_item_dir, engines, DERIVATIVE_WINDOW_PAGES).await;
+    let (result, windows) = match built {
+        Ok(v) => v,
+        Err(e) => {
+            if let Error::DerivativeIncomplete { from, to, .. } = &e {
+                store
+                    .record_failure(&att_key, &hash, &e.to_string(), Some((*from, *to)))
+                    .await;
+            }
+            return Err(e);
+        }
+    };
+
+    if is_layout_faithful(&result) {
+        let meta = DerivativeMeta {
+            attachment_key: att_key.clone(),
+            source_hash: hash.clone(),
+            profile: EXTRACTION_PROFILE.to_string(),
+            engine: result.source,
+            format: result.format,
+            page_anchors: result.page_anchors,
+            character_count: result.character_count,
+            completeness: result.completeness.clone(),
+            windows,
+            built_at: String::new(),
+        };
+        if let Err(e) = store.put(&att_key, &hash, &result.text, &meta).await {
+            // A store that cannot be written must not turn a good extraction
+            // into a failure: the caller still gets its text.
+            tracing::warn!(error = %e, key = %att_key, "failed to store pdf derivative");
+        }
+    } else {
+        tracing::debug!(
+            key = %att_key,
+            source = ?result.source,
+            "extraction was not layout-faithful; nothing stored"
+        );
+    }
+    Ok(result)
+}
+
+/// Rebuild a [`PdfTextResult`] from a store hit, reporting the provenance of
+/// the *stored bytes* — the engine and profile that produced them, which may
+/// be days old and is not necessarily what would run now.
+fn stored_to_result(hit: &StoredDerivative) -> PdfTextResult {
+    PdfTextResult {
+        text: hit.text.clone(),
+        source: hit.meta.engine,
+        character_count: hit.meta.character_count,
+        format: hit.meta.format,
+        page_anchors: hit.meta.page_anchors,
+        completeness: hit.meta.completeness.clone(),
+        served_from: ServedFrom::Store,
+        profile: Some(hit.meta.profile.clone()),
+    }
+}
+
+/// Store-aware first-pages read. The first N pages are the window `[1, n]`,
+/// which a stored whole-document derivative answers without extracting.
+#[allow(clippy::too_many_arguments)]
+pub async fn get_pdf_first_pages_stored(
+    pool: &ReadOnlyPool,
+    parent_key: &str,
+    library_id: i64,
+    storage_dir: &Path,
+    n_pages: usize,
+    engines: &PdfEngines,
+    store: &DerivativeStore,
+    plain: bool,
+) -> Result<PdfTextResult> {
+    let window = if n_pages == 0 {
+        Some((1, 1))
+    } else {
+        Some((1, n_pages as u32))
+    };
+    let full = get_pdf_text_stored(
+        pool,
+        parent_key,
+        library_id,
+        storage_dir,
+        engines,
+        store,
+        plain,
+        window,
+        false,
+    )
+    .await?;
+    Ok(truncate_to_first_pages(full, n_pages))
+}
+
 pub async fn get_pdf_first_pages(
     pool: &ReadOnlyPool,
     parent_key: &str,
@@ -1209,6 +1464,8 @@ pub fn truncate_to_first_pages(full: PdfTextResult, n_pages: usize) -> PdfTextRe
             format: full.format,
             page_anchors: true,
             completeness,
+            served_from: full.served_from,
+            profile: full.profile,
         }
     } else {
         let cap = n_pages * PLAIN_CHARS_PER_PAGE;
@@ -1231,8 +1488,199 @@ pub fn truncate_to_first_pages(full: PdfTextResult, n_pages: usize) -> PdfTextRe
             format: full.format,
             page_anchors: false,
             completeness,
+            served_from: full.served_from,
+            profile: full.profile,
         }
     }
+}
+
+/// Pages per window when walking a document too large to extract whole.
+///
+/// Twenty is the size the CLI already walks with and the size the tool
+/// description recommends: about seven seconds a window on a scan, comfortably
+/// inside the convert timeout, and small enough that one failure costs little.
+pub const DERIVATIVE_WINDOW_PAGES: u32 = 20;
+
+/// True when a result came from a layout-aware route — the only output allowed
+/// into the derivative store.
+///
+/// A flat engine cannot express a table, so storing its output would make a
+/// lossy artefact permanent: the accident of a cold service at one moment
+/// would outlive itself and be served to every later reader as though it were
+/// the document. Length is never the criterion (the incident that motivated
+/// this had *comparable* character counts with every table gone).
+pub fn is_layout_faithful(r: &PdfTextResult) -> bool {
+    matches!(
+        r.source,
+        PdfTextSource::Docling | PdfTextSource::OcrThenDocling
+    ) && r.format == PdfFormat::Markdown
+}
+
+/// Split page-anchored markdown into `(page_number, section_text)` pairs.
+/// Text before the first anchor is dropped: it belongs to no page.
+fn split_anchored_pages(text: &str) -> Vec<(u32, String)> {
+    let mut out: Vec<(u32, String)> = Vec::new();
+    for line in text.lines() {
+        if let Some(n) = parse_page_anchor(line) {
+            out.push((n, String::new()));
+            continue;
+        }
+        if let Some((_, body)) = out.last_mut() {
+            body.push_str(line);
+            body.push('\n');
+        }
+    }
+    out
+}
+
+/// Assemble window results, in page order, into one whole-document result.
+///
+/// The assembly is a concatenation, not a summary: every window contributes
+/// all of its pages. The merged completeness report describes the whole —
+/// `complete` only if every window was complete, and the drop vectors are the
+/// union, so a single bad page in a 60-page walk cannot be lost in the average.
+fn assemble_windows(parts: Vec<PdfTextResult>, total: u32, windows: &[(u32, u32)]) -> PdfTextResult {
+    let first = parts
+        .first()
+        .expect("assemble_windows called with no windows");
+    let source = first.source;
+    let format = first.format;
+    let page_anchors = first.page_anchors;
+    let mixed_routes = parts.iter().any(|p| p.source != source);
+
+    let mut text = String::new();
+    let mut c = Completeness {
+        complete: parts.iter().all(|p| p.completeness.complete),
+        engine: source,
+        total_pages: total,
+        pages: 0,
+        per_page_chars: Vec::new(),
+        undecoded_formulas: Vec::new(),
+        untranscribed_images: Vec::new(),
+        ocr_pages: Vec::new(),
+        low_text_pages: Vec::new(),
+        notes: Vec::new(),
+    };
+    for p in &parts {
+        if !text.is_empty() {
+            text.push_str("\n\n");
+        }
+        text.push_str(p.text.trim_end());
+        c.pages += p.completeness.pages;
+        c.per_page_chars.extend_from_slice(&p.completeness.per_page_chars);
+        c.undecoded_formulas
+            .extend_from_slice(&p.completeness.undecoded_formulas);
+        c.untranscribed_images
+            .extend_from_slice(&p.completeness.untranscribed_images);
+        c.ocr_pages.extend_from_slice(&p.completeness.ocr_pages);
+        c.low_text_pages
+            .extend_from_slice(&p.completeness.low_text_pages);
+        for n in &p.completeness.notes {
+            // Per-window notes about windowing itself are noise once the
+            // windows have been reassembled into a whole document.
+            if !n.starts_with("page window") && !c.notes.contains(n) {
+                c.notes.push(n.clone());
+            }
+        }
+    }
+    text.push('\n');
+    if windows.len() > 1 {
+        c.notes.push(format!(
+            "assembled from {} page windows walked in order ({}), covering all {total} pages",
+            windows.len(),
+            windows
+                .iter()
+                .map(|(f, t)| format!("{f}..={t}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    if mixed_routes {
+        // Different engines across windows means part of the document is
+        // structure-aware and part is not. Never claim completeness for that.
+        c.complete = false;
+        c.notes.push(
+            "windows were produced by different engines; pages from a flat-text \
+             window carry no table/formula structure"
+                .into(),
+        );
+    }
+    let n = text.chars().count();
+    PdfTextResult {
+        text,
+        source,
+        character_count: n,
+        format,
+        page_anchors,
+        completeness: c,
+        served_from: ServedFrom::Fresh,
+        profile: None,
+    }
+}
+
+/// Extract a document *whole*, walking page windows when it is too large for
+/// a single pass.
+///
+/// [`extract_windowed`] deliberately refuses a whole-document request above
+/// `whole_document_max_pages`, because one convert over hundreds of pages
+/// would blow the time budget and the response size. That refusal is right for
+/// a *tool call* and wrong for building a stored artefact, which is written
+/// once and read many times. This walks the document a window at a time and
+/// assembles the pieces, so a 69-page report or a 414-page scan gets a
+/// complete derivative even though asking for either whole in one call is
+/// still, correctly, refused.
+///
+/// A failed window aborts the build with [`Error::DerivativeIncomplete`]
+/// naming the pages, so a short assembly is never mistaken for the document.
+pub async fn build_whole_document(
+    pdf_path: &Path,
+    storage_item_dir: &Path,
+    engines: &PdfEngines,
+    window_pages: u32,
+) -> Result<(PdfTextResult, Vec<(u32, u32)>)> {
+    let total = total_page_count(pdf_path).await;
+    // Small enough to extract in one pass, or a page count we could not
+    // determine (in which case windowing would be guesswork): one call.
+    if total == 0 || total <= engines.whole_document_max_pages() {
+        let r = extract_windowed(pdf_path, storage_item_dir, engines, false, None).await?;
+        let w = if total > 0 { vec![(1, total)] } else { vec![] };
+        return Ok((r, w));
+    }
+
+    let step = window_pages.max(1);
+    let mut windows: Vec<(u32, u32)> = Vec::new();
+    let mut start = 1u32;
+    while start <= total {
+        let end = (start + step - 1).min(total);
+        windows.push((start, end));
+        start = end + 1;
+    }
+
+    let mut parts: Vec<PdfTextResult> = Vec::with_capacity(windows.len());
+    for &(from, to) in &windows {
+        tracing::info!(
+            path = %pdf_path.display(),
+            from, to, total,
+            "building derivative: extracting window"
+        );
+        let r = extract_windowed(
+            pdf_path,
+            storage_item_dir,
+            engines,
+            false,
+            Some((from, to)),
+        )
+        .await
+        .map_err(|e| Error::DerivativeIncomplete {
+            path: pdf_path.display().to_string(),
+            from,
+            to,
+            total,
+            detail: e.to_string(),
+        })?;
+        parts.push(r);
+    }
+    Ok((assemble_windows(parts, total, &windows), windows))
 }
 
 /// Whole-document orchestrator — the historical entry point. Equivalent to
@@ -1457,6 +1905,8 @@ async fn extract_core(
                         format: PdfFormat::Markdown,
                         page_anchors: true,
                         completeness,
+                        served_from: ServedFrom::Fresh,
+                        profile: None,
                     });
                 }
                 Err(e) => {
@@ -1491,6 +1941,8 @@ async fn extract_core(
                 format: PdfFormat::Plain,
                 page_anchors: false,
                 completeness: Completeness::flat_text(PdfTextSource::ZoteroCache),
+                served_from: ServedFrom::Fresh,
+                profile: None,
             });
         }
         tracing::warn!(
@@ -1526,6 +1978,8 @@ async fn extract_core(
             format: PdfFormat::Plain,
             page_anchors: false,
             completeness: Completeness::flat_text(source),
+            served_from: ServedFrom::Fresh,
+            profile: None,
         });
     }
     let FlatChainOutcome::Nothing {
@@ -1575,6 +2029,8 @@ async fn extract_core(
                             format: PdfFormat::Plain,
                             page_anchors: false,
                             completeness,
+                            served_from: ServedFrom::Fresh,
+                            profile: None,
                         });
                     }
                     tracing::warn!(
@@ -1981,6 +2437,8 @@ mod truncation_tests {
             format: PdfFormat::Markdown,
             page_anchors: true,
             completeness,
+            served_from: ServedFrom::Fresh,
+            profile: None,
         }
     }
 
@@ -2038,6 +2496,8 @@ mod truncation_tests {
             format: PdfFormat::Plain,
             page_anchors: false,
             completeness: Completeness::flat_text(PdfTextSource::LiveExtract),
+            served_from: ServedFrom::Fresh,
+            profile: None,
         };
 
         let r = truncate_to_first_pages(full, 2);
@@ -2065,6 +2525,8 @@ mod truncation_tests {
             format: PdfFormat::Plain,
             page_anchors: false,
             completeness: Completeness::flat_text(PdfTextSource::LiveExtract),
+            served_from: ServedFrom::Fresh,
+            profile: None,
         };
         let r = truncate_to_first_pages(full, 2);
         assert_eq!(r.text, "short plain body");

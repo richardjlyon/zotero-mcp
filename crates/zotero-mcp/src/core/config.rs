@@ -208,6 +208,13 @@ impl Default for WebConfig {
 pub struct PathsConfig {
     pub cache_dir: Option<String>,
     pub log_dir: Option<String>,
+    /// Where durable PDF text derivatives are stored. Defaults to a
+    /// server-owned state directory. **Must not be set to anything inside the
+    /// Zotero data directory**: writes there go to `api.zotero.org` and take
+    /// an unbounded sync interval to become visible to local reads, and on
+    /// hosts where `~/Zotero` is a read-only mirror the write fails outright.
+    #[serde(default)]
+    pub derivatives_dir: Option<String>,
 }
 
 impl Default for PathsConfig {
@@ -215,6 +222,7 @@ impl Default for PathsConfig {
         Self {
             cache_dir: None,
             log_dir: None,
+            derivatives_dir: None,
         }
     }
 }
@@ -293,6 +301,19 @@ impl Config {
         directories::ProjectDirs::from("dev", "zotero-mcp", "zotero-mcp")
             .map(|d| d.cache_dir().to_path_buf())
             .unwrap_or_else(|| PathBuf::from(expand_tilde("~/.cache/zotero-mcp")))
+    }
+
+    /// Root of the durable derivative store. Server-owned and deliberately
+    /// outside the Zotero data directory — see [`crate::core::derivatives`]
+    /// for why a Zotero attachment and a `~/Zotero/storage` sidecar were both
+    /// rejected.
+    pub fn resolved_derivatives_dir(&self) -> PathBuf {
+        if let Some(p) = &self.paths.derivatives_dir {
+            return PathBuf::from(expand_tilde(p));
+        }
+        directories::ProjectDirs::from("dev", "zotero-mcp", "zotero-mcp")
+            .map(|d| d.data_local_dir().join("derivatives"))
+            .unwrap_or_else(|| PathBuf::from(expand_tilde("~/.local/state/zotero-mcp/derivatives")))
     }
 
     pub fn resolved_log_dir(&self) -> PathBuf {

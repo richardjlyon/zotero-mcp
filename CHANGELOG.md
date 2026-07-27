@@ -6,6 +6,72 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Durable PDF text derivatives — extraction happens once per document, not
+  once per reader.** A layout-faithful extraction is now stored and served back
+  on later reads. Previously the markdown existed only in the calling model's
+  context and died with the session, so every session, client and agent that
+  needed a document re-ran Docling over it; a 69-page report cost ~250,000
+  characters of context to produce a file that should have been written once.
+  `get_pdf_text` consults the store first and extracts only on a miss —
+  callers need change nothing — and each result carries `served_from`
+  (`store` or `fresh`).
+
+  - **Storage is server-owned and outside the Zotero library**, at
+    `paths.derivatives_dir` (default: the platform state directory). A Zotero
+    child attachment was rejected because writes go to `api.zotero.org` while
+    reads come from the local SQLite database, so a derivative would be
+    invisible to this server's own reads until Zotero synced it back down; a
+    sidecar under `~/Zotero/storage` was rejected because that directory is a
+    read-only mirror on some hosts. The costs of the choice, stated plainly:
+    derivatives are not visible in the Zotero UI and each host builds its own.
+  - **Whole-document derivatives for documents over the page cap.** A
+    derivative is built by walking page windows internally and assembling them
+    in order, so the 69-page report and a 414-page scan both get a complete
+    one — even though asking for either whole in a single call is still,
+    correctly, refused with `PdfDocumentTooLarge`. A failed window aborts the
+    build and stores nothing, so a short assembly is never mistaken for the
+    document.
+  - **Staleness is defined, not guessed**: the store is keyed to the PDF's
+    content hash (not mtime, which Resilio rewrites) plus a hand-bumped
+    extraction-profile string. `refresh=true` forces a rebuild.
+  - **Only layout-faithful output is ever stored.** Flat-text output is never
+    stored, never overwrites a stored derivative, and never satisfies
+    "a derivative exists" — whatever its character count. On the incident that
+    motivated this, the flat run produced *more* characters than the layout run
+    with every table gone, so length can never be the criterion.
+
+- **`get_derivative_path`** — returns the filesystem path of an item's stored
+  markdown, its status (`present` / `absent` / `failed` / `no_pdf`) and its
+  provenance, *without* the text. Response size is the same for a 2-page paper
+  and a 69-page report, so handing a whole document to another tool or a person
+  no longer costs the document's tokens. Paths are server-local, which the tool
+  description states explicitly for callers connected over HTTP.
+
+- **`build_derivatives`** — backfill for items whose PDFs were attached before
+  the store existed. Issues **no** Zotero writes at all, so item metadata,
+  hand-written `extra` fields, tags, collections and notes cannot be touched.
+  Resumable (already-built items are reported and skipped) with per-item
+  outcomes and counts only, never text.
+
+### Changed
+
+- **`search_items` now states what its full-text option actually covers.** The
+  index searched is Zotero's own, written by Zotero's indexer and never by this
+  server, and it does not cover the stored markdown derivatives — so a term
+  that appears only inside a table can be in the document and not in the index.
+  Two further limits are now documented rather than left to be discovered: the
+  full-text clause applies to single-word queries only (a query containing
+  whitespace drops full-text matching entirely rather than degrading it), and
+  matching resolves through parent items, so a top-level attachment is never
+  returned by a full-text match.
+
+- **`zotero-mcp pdf-text` reads through the store**, so a repeated invocation
+  over the same document is now nearly free. Window walking moved inside the
+  shared builder rather than being open-coded in the CLI; the stderr header
+  gained a `served:` field. `--window-size` is accepted and ignored.
+
 ## [0.4.0] - 2026-07-25
 
 > **Response shapes changed in this release.** Three groups: the nine

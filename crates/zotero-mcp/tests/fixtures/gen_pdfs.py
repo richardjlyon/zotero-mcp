@@ -318,6 +318,47 @@ def make_multipage() -> None:
     print(f"Wrote {out} ({out.stat().st_size} bytes)")
 
 
+def make_large() -> None:
+    """A prose document longer than the whole-document page cap (default 50).
+
+    Sixty pages, each carrying its own page number in words plus filler, so a
+    window walk can assert that every page appears exactly once and in order.
+    A whole-document extraction of this file is refused by the large-document
+    guard, which is the point: the derivative for it can only be built by
+    walking windows.
+    """
+    letter, _canvas = _reportlab()
+    from reportlab.lib.styles import getSampleStyleSheet
+    from reportlab.platypus import PageBreak, Paragraph, SimpleDocTemplate, Spacer
+
+    out = HERE / "large.pdf"
+    styles = getSampleStyleSheet()
+    body = styles["BodyText"]
+    filler = (
+        "This paragraph exists purely to give the page a healthy body of "
+        "prose so that no page trips the low-text completeness floor. "
+    )
+    story = []
+    for n in range(1, LARGE_PDF_PAGES + 1):
+        if n > 1:
+            story.append(PageBreak())
+        story.append(Paragraph(f"Section {n}", styles["Heading1"]))
+        story.append(Paragraph(filler * 3, body))
+        story.append(Spacer(1, 8))
+        # The marker each window-walk assertion looks for. Unique per page and
+        # unlikely to occur by accident anywhere else in the corpus.
+        story.append(Paragraph(f"Pagemarker {n} of {LARGE_PDF_PAGES}.", body))
+        story.append(Spacer(1, 8))
+        story.append(Paragraph(filler * 3, body))
+    SimpleDocTemplate(str(out), pagesize=letter).build(story)
+    print(f"Wrote {out} ({out.stat().st_size} bytes)")
+
+
+# Page count of large.pdf. Must stay above the default
+# `pdf_whole_document_max_pages` (50) or the fixture stops testing the thing
+# it exists to test. Mirrored in Rust as `fixtures::LARGE_PDF_PAGES`.
+LARGE_PDF_PAGES = 60
+
 if __name__ == "__main__":
     make_hello()
     make_scanned()
@@ -325,3 +366,4 @@ if __name__ == "__main__":
     make_tables()
     make_twocolumn()
     make_multipage()
+    make_large()

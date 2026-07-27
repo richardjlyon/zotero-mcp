@@ -123,6 +123,24 @@ pub enum Error {
         threshold: u32,
     },
 
+    #[error("derivative store: {0}")]
+    DerivativeStore(String),
+
+    #[error(
+        "pdf {path}: could not build a complete text derivative — window \
+         {from}..={to} of {total} pages failed ({detail}). Nothing was stored, so \
+         no partial extraction can be mistaken for the whole document. Remedy: \
+         retry once the extraction route is healthy; completed windows are not \
+         lost, the build resumes."
+    )]
+    DerivativeIncomplete {
+        path: String,
+        from: u32,
+        to: u32,
+        total: u32,
+        detail: String,
+    },
+
     #[error("html extraction failed: {0}")]
     Html(String),
 
