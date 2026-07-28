@@ -258,6 +258,43 @@ pub struct PdfTextResult {
     pub profile: Option<String>,
 }
 
+/// What a caller will accept from an extraction.
+///
+/// Two independent choices that used to be one bare `plain: bool`:
+///
+/// * `plain` — "give me flat text on purpose", the historical opt-out from the
+///   layout route. Unchanged, and never gated.
+/// * `allow_degraded` — "I would rather have flat text than nothing if the
+///   layout route is configured but down". Default `false`, which is the
+///   behavioural change: a cold layout service now fails loudly instead of
+///   quietly substituting text that cannot express tables.
+///
+/// Both default to false, so [`ExtractPolicy::default()`] is the strict,
+/// layout-or-nothing posture.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ExtractPolicy {
+    pub plain: bool,
+    pub allow_degraded: bool,
+}
+
+impl ExtractPolicy {
+    /// The caller asked for flat output deliberately.
+    pub fn plain() -> Self {
+        Self {
+            plain: true,
+            allow_degraded: false,
+        }
+    }
+
+    /// Accept flat output rather than an error when the layout route is down.
+    pub fn allowing_degraded() -> Self {
+        Self {
+            plain: false,
+            allow_degraded: true,
+        }
+    }
+}
+
 /// Provenance of the text in a [`PdfTextResult`]: extracted during this call,
 /// or read back from the derivative store.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
@@ -663,6 +700,12 @@ impl DoclingEngine {
             convert_timeout,
             health_timeout,
         }
+    }
+
+    /// The configured service endpoint. Named in a refusal so the caller is
+    /// told *what* is down rather than merely that something is.
+    pub fn endpoint(&self) -> &str {
+        &self.base_url
     }
 
     /// Short probe of `GET {base_url}/health`. False on any error or
@@ -1121,7 +1164,7 @@ pub async fn get_pdf_text(
     library_id: i64,
     storage_dir: &Path,
     engines: &PdfEngines,
-    plain: bool,
+    policy: ExtractPolicy,
     window: Option<(u32, u32)>,
 ) -> Result<PdfTextResult> {
     let pdf_path = resolve_path(pool, parent_key, library_id, storage_dir).await?;
@@ -1129,7 +1172,7 @@ pub async fn get_pdf_text(
         .parent()
         .ok_or_else(|| Error::AttachmentNotFound(parent_key.into()))?
         .to_path_buf();
-    extract_windowed(&pdf_path, &storage_item_dir, engines, plain, window).await
+    extract_windowed(&pdf_path, &storage_item_dir, engines, policy, window).await
 }
 
 /// The Zotero attachment key owning a stored file: Zotero lays storage out as
@@ -1223,13 +1266,13 @@ pub async fn get_pdf_text_stored(
     storage_dir: &Path,
     engines: &PdfEngines,
     store: &DerivativeStore,
-    plain: bool,
+    policy: ExtractPolicy,
     window: Option<(u32, u32)>,
     refresh: bool,
 ) -> Result<PdfTextResult> {
-    if plain {
+    if policy.plain {
         return get_pdf_text(
-            pool, parent_key, library_id, storage_dir, engines, true, window,
+            pool, parent_key, library_id, storage_dir, engines, policy, window,
         )
         .await;
     }
@@ -1239,7 +1282,7 @@ pub async fn get_pdf_text_stored(
         .ok_or_else(|| Error::AttachmentNotFound(parent_key.into()))?
         .to_path_buf();
     let Some(att_key) = attachment_key_for(&pdf_path) else {
-        return extract_windowed(&pdf_path, &storage_item_dir, engines, plain, window).await;
+        return extract_windowed(&pdf_path, &storage_item_dir, engines, policy, window).await;
     };
     let hash = DerivativeStore::content_hash(&pdf_path).await?;
 
@@ -1264,14 +1307,21 @@ pub async fn get_pdf_text_stored(
             &pdf_path,
             &storage_item_dir,
             engines,
-            plain,
+            policy,
             Some((from, to)),
         )
         .await;
     }
 
     let built =
-        build_whole_document(&pdf_path, &storage_item_dir, engines, DERIVATIVE_WINDOW_PAGES).await;
+        build_whole_document(
+            &pdf_path,
+            &storage_item_dir,
+            engines,
+            policy,
+            DERIVATIVE_WINDOW_PAGES,
+        )
+        .await;
     let (result, windows) = match built {
         Ok(v) => v,
         Err(e) => {
@@ -1339,7 +1389,7 @@ pub async fn get_pdf_first_pages_stored(
     n_pages: usize,
     engines: &PdfEngines,
     store: &DerivativeStore,
-    plain: bool,
+    policy: ExtractPolicy,
 ) -> Result<PdfTextResult> {
     let window = if n_pages == 0 {
         Some((1, 1))
@@ -1353,7 +1403,7 @@ pub async fn get_pdf_first_pages_stored(
         storage_dir,
         engines,
         store,
-        plain,
+        policy,
         window,
         false,
     )
@@ -1368,7 +1418,7 @@ pub async fn get_pdf_first_pages(
     storage_dir: &Path,
     n_pages: usize,
     engines: &PdfEngines,
-    plain: bool,
+    policy: ExtractPolicy,
 ) -> Result<PdfTextResult> {
     // The first N pages ARE a page window `[1, n]`: extract only that window
     // so a large (or scanned) document is not fully processed just to return
@@ -1385,7 +1435,7 @@ pub async fn get_pdf_first_pages(
         library_id,
         storage_dir,
         engines,
-        plain,
+        policy,
         window,
     )
     .await?;
@@ -1636,13 +1686,14 @@ pub async fn build_whole_document(
     pdf_path: &Path,
     storage_item_dir: &Path,
     engines: &PdfEngines,
+    policy: ExtractPolicy,
     window_pages: u32,
 ) -> Result<(PdfTextResult, Vec<(u32, u32)>)> {
     let total = total_page_count(pdf_path).await;
     // Small enough to extract in one pass, or a page count we could not
     // determine (in which case windowing would be guesswork): one call.
     if total == 0 || total <= engines.whole_document_max_pages() {
-        let r = extract_windowed(pdf_path, storage_item_dir, engines, false, None).await?;
+        let r = extract_windowed(pdf_path, storage_item_dir, engines, policy, None).await?;
         let w = if total > 0 { vec![(1, total)] } else { vec![] };
         return Ok((r, w));
     }
@@ -1667,7 +1718,7 @@ pub async fn build_whole_document(
             pdf_path,
             storage_item_dir,
             engines,
-            false,
+            policy,
             Some((from, to)),
         )
         .await
@@ -1691,9 +1742,9 @@ pub async fn extract(
     pdf_path: &Path,
     storage_item_dir: &Path,
     engines: &PdfEngines,
-    plain: bool,
+    policy: ExtractPolicy,
 ) -> Result<PdfTextResult> {
-    extract_windowed(pdf_path, storage_item_dir, engines, plain, None).await
+    extract_windowed(pdf_path, storage_item_dir, engines, policy, None).await
 }
 
 /// Windowed orchestrator.
@@ -1713,7 +1764,7 @@ pub async fn extract_windowed(
     pdf_path: &Path,
     storage_item_dir: &Path,
     engines: &PdfEngines,
-    plain: bool,
+    policy: ExtractPolicy,
     window: Option<(u32, u32)>,
 ) -> Result<PdfTextResult> {
     // Total page count up front (engine-independent): reported on every
@@ -1785,7 +1836,7 @@ pub async fn extract_windowed(
         &working_path,
         storage_item_dir,
         engines,
-        plain,
+        policy,
         start_page,
         use_cache,
     )
@@ -1805,7 +1856,7 @@ async fn extract_core(
     pdf_path: &Path,
     storage_item_dir: &Path,
     engines: &PdfEngines,
-    plain: bool,
+    policy: ExtractPolicy,
     start_page: u32,
     use_cache: bool,
 ) -> Result<PdfTextResult> {
@@ -1815,7 +1866,7 @@ async fn extract_core(
     //    health/convert failure falls through to that chain, whose
     //    results report `complete: false`. Skipped when the caller asked
     //    for `plain` output.
-    if let Some(docling) = engines.docling().filter(|_| !plain) {
+    if let Some(docling) = engines.docling().filter(|_| !policy.plain) {
         if docling.healthy().await {
             // OCR pre-step (not a route): when the PDF has no usable text
             // layer, run `ocrmypdf --skip-text` into a temp copy and send
@@ -1923,6 +1974,30 @@ async fn extract_core(
                 "docling health check failed; falling back to flat-text chain"
             );
         }
+
+        // The layout route was CONFIGURED on this host and did not produce
+        // output — cold service, failed health probe, or a failed convert.
+        // Everything below this point is a flat engine, which cannot express a
+        // table, and the incident that motivated this gate is exactly that
+        // substitution arriving as an ordinary success: the same call minutes
+        // apart returned table-free plain text and then markdown with 42
+        // tables, both HTTP 200, distinguished only by a metadata field a
+        // caller had to know to inspect. Character volume was comparable, so
+        // no size check catches it. Refuse rather than downgrade silently.
+        //
+        // Scoped deliberately to "configured but unavailable": a host with no
+        // layout route at all (CI, the Pi) never reaches here, and keeps
+        // today's labelled flat-text behaviour. `plain` never reaches here
+        // either — that caller asked for flat output on purpose.
+        if !policy.allow_degraded {
+            return Err(Error::LayoutRouteUnavailable {
+                path: pdf_path.display().to_string(),
+                endpoint: engines
+                    .docling()
+                    .map(|d| d.endpoint().to_string())
+                    .unwrap_or_default(),
+            });
+        }
     }
 
     // 1. Cache hit — only when the cached text clears the minimum floor.
@@ -1998,7 +2073,7 @@ async fn extract_core(
     //    here: an ambiguous (`Unknown`) probe still earns an OCR attempt
     //    now that every other route has produced nothing. Skipped for
     //    `plain` callers, who asked for the flat path that never OCRs.
-    let layer = if plain {
+    let layer = if policy.plain {
         TextLayer::Present // plain callers never OCR; treat as "has text layer".
     } else {
         probe_text_layer(pdf_path).await
@@ -2623,7 +2698,7 @@ mod orchestrator_tests {
             StubEngine::never(),
             FallbackState::Ready(StubEngine::never()),
         );
-        let r = extract(&pdf, dir.path(), &engines, false).await.unwrap();
+        let r = extract(&pdf, dir.path(), &engines, ExtractPolicy::allowing_degraded()).await.unwrap();
 
         assert_eq!(r.source, PdfTextSource::ZoteroCache);
         assert!(r.text.contains("cached body"));
@@ -2639,7 +2714,7 @@ mod orchestrator_tests {
             StubEngine::ok("primary text"),
             FallbackState::Ready(StubEngine::never()),
         );
-        let r = extract(&pdf, dir.path(), &engines, false).await.unwrap();
+        let r = extract(&pdf, dir.path(), &engines, ExtractPolicy::allowing_degraded()).await.unwrap();
 
         assert_eq!(r.source, PdfTextSource::LiveExtract);
         assert_eq!(r.text, "primary text");
@@ -2658,7 +2733,7 @@ mod orchestrator_tests {
             StubEngine::fail("unhandled function type 4"),
             FallbackState::Ready(StubEngine::ok("recovered text")),
         );
-        let r = extract(&pdf, dir.path(), &engines, false).await.unwrap();
+        let r = extract(&pdf, dir.path(), &engines, ExtractPolicy::allowing_degraded()).await.unwrap();
 
         assert_eq!(r.source, PdfTextSource::PdftotextFallback);
         assert_eq!(r.text, "recovered text");
@@ -2682,7 +2757,7 @@ mod orchestrator_tests {
             StubEngine::fail("primary boom"),
             FallbackState::Ready(StubEngine::fail("pdftotext boom")),
         );
-        let err = extract(&pdf, dir.path(), &engines, false)
+        let err = extract(&pdf, dir.path(), &engines, ExtractPolicy::allowing_degraded())
             .await
             .unwrap_err();
 
@@ -2704,7 +2779,7 @@ mod orchestrator_tests {
         let pdf = write_dummy_pdf(dir.path());
 
         let engines = engines_with(StubEngine::fail("primary"), FallbackState::BinaryMissing);
-        let err = extract(&pdf, dir.path(), &engines, false)
+        let err = extract(&pdf, dir.path(), &engines, ExtractPolicy::allowing_degraded())
             .await
             .unwrap_err();
         assert!(matches!(err, Error::PdftotextMissing));
@@ -2716,7 +2791,7 @@ mod orchestrator_tests {
         let pdf = write_dummy_pdf(dir.path());
 
         let engines = engines_with(StubEngine::fail("primary"), FallbackState::Disabled);
-        let err = extract(&pdf, dir.path(), &engines, false)
+        let err = extract(&pdf, dir.path(), &engines, ExtractPolicy::allowing_degraded())
             .await
             .unwrap_err();
         match err {
@@ -2734,7 +2809,7 @@ mod orchestrator_tests {
             StubEngine::fail("primary"),
             FallbackState::Ready(StubEngine::timeout(42)),
         );
-        let err = extract(&pdf, dir.path(), &engines, false)
+        let err = extract(&pdf, dir.path(), &engines, ExtractPolicy::allowing_degraded())
             .await
             .unwrap_err();
         match err {
@@ -2755,7 +2830,7 @@ mod orchestrator_tests {
             StubEngine::ok("a b c"), // 3 non-whitespace chars: below the floor
             FallbackState::Ready(StubEngine::timeout(42)),
         );
-        let err = extract(&pdf, dir.path(), &engines, false)
+        let err = extract(&pdf, dir.path(), &engines, ExtractPolicy::allowing_degraded())
             .await
             .unwrap_err();
         match err {
@@ -2776,7 +2851,7 @@ mod orchestrator_tests {
             StubEngine::fail("primary"),
             FallbackState::Ready(StubEngine::ok("rescued text from the stub fallback")),
         );
-        let r = extract(&pdf, &nonexistent, &engines, false).await.unwrap();
+        let r = extract(&pdf, &nonexistent, &engines, ExtractPolicy::allowing_degraded()).await.unwrap();
         assert_eq!(r.source, PdfTextSource::PdftotextFallback);
         assert_eq!(r.text, "rescued text from the stub fallback");
         assert!(!nonexistent.join(".zotero-ft-cache").exists());
@@ -2794,7 +2869,7 @@ mod orchestrator_tests {
             StubEngine::ok("primary text recovered by the stub engine"),
             FallbackState::Disabled,
         );
-        let r = extract(&pdf, dir.path(), &engines, false).await.unwrap();
+        let r = extract(&pdf, dir.path(), &engines, ExtractPolicy::allowing_degraded()).await.unwrap();
 
         assert_eq!(
             r.source,
@@ -2813,7 +2888,7 @@ mod orchestrator_tests {
             StubEngine::ok("x"),
             FallbackState::Ready(StubEngine::ok("fallback recovered the real body text")),
         );
-        let r = extract(&pdf, dir.path(), &engines, false).await.unwrap();
+        let r = extract(&pdf, dir.path(), &engines, ExtractPolicy::allowing_degraded()).await.unwrap();
 
         assert_eq!(
             r.source,
@@ -2837,7 +2912,7 @@ mod orchestrator_tests {
             fallback: FallbackState::Disabled,
             whole_document_max_pages: 50,
         };
-        let err = extract(&fixture("scanned.pdf"), dir.path(), &engines, false)
+        let err = extract(&fixture("scanned.pdf"), dir.path(), &engines, ExtractPolicy::allowing_degraded())
             .await
             .expect_err("near-empty extraction must not be success");
         let msg = err.to_string();
@@ -2905,7 +2980,7 @@ mod orchestrator_tests {
             StubEngine::never(),
             FallbackState::Ready(StubEngine::never()),
         );
-        let r = extract(&pdf, dir.path(), &engines, false).await.unwrap();
+        let r = extract(&pdf, dir.path(), &engines, ExtractPolicy::allowing_degraded()).await.unwrap();
 
         assert_eq!(r.source, PdfTextSource::Docling);
         assert_eq!(r.format, PdfFormat::Markdown);
@@ -2959,7 +3034,7 @@ mod orchestrator_tests {
             StubEngine::never(),
             FallbackState::Ready(StubEngine::never()),
         );
-        let r = extract(&pdf, dir.path(), &engines, false).await.unwrap();
+        let r = extract(&pdf, dir.path(), &engines, ExtractPolicy::allowing_degraded()).await.unwrap();
 
         assert_eq!(r.source, PdfTextSource::Docling);
         assert_eq!(r.format, PdfFormat::Markdown);
@@ -3023,7 +3098,7 @@ mod orchestrator_tests {
             StubEngine::never(),
             FallbackState::Ready(StubEngine::never()),
         );
-        let r = extract(&pdf, dir.path(), &engines, false).await.unwrap();
+        let r = extract(&pdf, dir.path(), &engines, ExtractPolicy::allowing_degraded()).await.unwrap();
 
         assert_eq!(r.source, PdfTextSource::Docling);
         // The formula region is preserved as an explicit undecoded marker,
@@ -3075,7 +3150,7 @@ mod orchestrator_tests {
             StubEngine::never(),
             FallbackState::Ready(StubEngine::never()),
         );
-        let r = extract(&pdf, dir.path(), &engines, false).await.unwrap();
+        let r = extract(&pdf, dir.path(), &engines, ExtractPolicy::allowing_degraded()).await.unwrap();
 
         assert_eq!(r.source, PdfTextSource::Docling);
         assert!(
@@ -3104,7 +3179,7 @@ mod orchestrator_tests {
             StubEngine::never(),
             FallbackState::Ready(StubEngine::never()),
         );
-        let r = extract(&pdf, dir.path(), &engines, false).await.unwrap();
+        let r = extract(&pdf, dir.path(), &engines, ExtractPolicy::allowing_degraded()).await.unwrap();
 
         assert_eq!(r.source, PdfTextSource::ZoteroCache);
         assert_eq!(r.format, PdfFormat::Plain);
@@ -3133,7 +3208,7 @@ mod orchestrator_tests {
             StubEngine::ok("flat text from the stub primary engine"),
             FallbackState::Ready(StubEngine::never()),
         );
-        let r = extract(&pdf, dir.path(), &engines, false).await.unwrap();
+        let r = extract(&pdf, dir.path(), &engines, ExtractPolicy::allowing_degraded()).await.unwrap();
 
         assert_eq!(r.source, PdfTextSource::LiveExtract);
         assert_eq!(r.format, PdfFormat::Plain);
@@ -3213,7 +3288,7 @@ mod orchestrator_tests {
             2,
         );
         let dir = TempDir::new().unwrap();
-        let err = extract(&fixture("multipage.pdf"), dir.path(), &engines, false)
+        let err = extract(&fixture("multipage.pdf"), dir.path(), &engines, ExtractPolicy::allowing_degraded())
             .await
             .expect_err("3-page doc over a 2-page ceiling must be refused");
         match err {
@@ -3232,7 +3307,7 @@ mod orchestrator_tests {
     }
 
     async fn err_names_windows(engines: &PdfEngines, pdf: &Path, dir: &Path) -> bool {
-        extract(pdf, dir, engines, false)
+        extract(pdf, dir, engines, ExtractPolicy::allowing_degraded())
             .await
             .err()
             .map(|e| {
@@ -3252,11 +3327,7 @@ mod orchestrator_tests {
             2,
         );
         let dir = TempDir::new().unwrap();
-        let r = extract_windowed(
-            &fixture("multipage.pdf"),
-            dir.path(),
-            &engines,
-            false,
+        let r = extract_windowed(&fixture("multipage.pdf"), dir.path(), &engines, ExtractPolicy::allowing_degraded(),
             Some((1, 1)),
         )
         .await
@@ -3283,7 +3354,7 @@ mod orchestrator_tests {
             50,
         );
         let dir = TempDir::new().unwrap();
-        let r = extract(&fixture("multipage.pdf"), dir.path(), &engines, false)
+        let r = extract(&fixture("multipage.pdf"), dir.path(), &engines, ExtractPolicy::allowing_degraded())
             .await
             .expect("whole-document extraction under the ceiling succeeds");
         assert_eq!(r.completeness.total_pages, 3);
@@ -3367,7 +3438,7 @@ mod orchestrator_tests {
         mount_convert_md(&server, "Scanned quarterly report recovered by OCR.").await;
 
         let engines = engines_with_docling_and_ocr(&server.uri(), Some(bin));
-        let r = extract(&scanned, dir.path(), &engines, false)
+        let r = extract(&scanned, dir.path(), &engines, ExtractPolicy::allowing_degraded())
             .await
             .unwrap();
 
@@ -3396,7 +3467,7 @@ mod orchestrator_tests {
             &server.uri(),
             Some(PathBuf::from("/nonexistent/ocrmypdf-bogus")),
         );
-        let r = extract(&fixture("scanned.pdf"), dir.path(), &engines, false)
+        let r = extract(&fixture("scanned.pdf"), dir.path(), &engines, ExtractPolicy::allowing_degraded())
             .await
             .unwrap();
 
@@ -3421,7 +3492,7 @@ mod orchestrator_tests {
         mount_convert_md(&server, "Server-side recovered text.").await;
 
         let engines = engines_with_docling_and_ocr(&server.uri(), None);
-        let r = extract(&fixture("scanned.pdf"), dir.path(), &engines, false)
+        let r = extract(&fixture("scanned.pdf"), dir.path(), &engines, ExtractPolicy::allowing_degraded())
             .await
             .unwrap();
 
@@ -3466,7 +3537,7 @@ mod orchestrator_tests {
             StubEngine::ok("flat text from the stub primary engine"),
             FallbackState::Ready(StubEngine::never()),
         );
-        let r = extract(&pdf, dir.path(), &engines, true).await.unwrap();
+        let r = extract(&pdf, dir.path(), &engines, ExtractPolicy::plain()).await.unwrap();
 
         assert_eq!(r.source, PdfTextSource::LiveExtract);
         assert_eq!(r.format, PdfFormat::Plain);
@@ -3493,7 +3564,7 @@ mod orchestrator_tests {
             StubEngine::fail("primary boom"),
             FallbackState::Ready(StubEngine::fail("pdftotext boom")),
         );
-        let err = extract(&pdf, dir.path(), &engines, true).await.unwrap_err();
+        let err = extract(&pdf, dir.path(), &engines, ExtractPolicy::plain()).await.unwrap_err();
 
         assert!(matches!(err, Error::PdfAllEnginesFailed { .. }));
     }
@@ -3520,7 +3591,7 @@ mod orchestrator_tests {
             StubEngine::ok("flat text from the stub primary engine"),
             FallbackState::Ready(StubEngine::never()),
         );
-        let r = extract(&pdf, dir.path(), &engines, false).await.unwrap();
+        let r = extract(&pdf, dir.path(), &engines, ExtractPolicy::allowing_degraded()).await.unwrap();
 
         assert_eq!(r.source, PdfTextSource::LiveExtract);
         assert!(!r.completeness.complete);

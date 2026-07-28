@@ -1,5 +1,5 @@
 mod fixtures;
-use zotero_mcp::core::pdf::{get_pdf_text, PdfEngines, PdfTextSource};
+use zotero_mcp::core::pdf::{ExtractPolicy, get_pdf_text, PdfEngines, PdfTextSource};
 use zotero_mcp::core::reader::pool::ReadOnlyPool;
 
 #[tokio::test]
@@ -12,10 +12,7 @@ async fn prefers_zotero_ft_cache_when_present() {
         "AAAA0001",
         1,
         &f.storage_dir(),
-        &engines,
-        false,
-        None,
-    )
+        &engines, ExtractPolicy::allowing_degraded(), None,)
     .await
     .unwrap();
     assert!(matches!(res.source, PdfTextSource::ZoteroCache));

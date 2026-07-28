@@ -17,8 +17,8 @@ use zotero_mcp::core::config::{Config, ZoteroConfig};
 use zotero_mcp::core::derivatives::{DerivativeStatus, DerivativeStore, EXTRACTION_PROFILE};
 use zotero_mcp::core::error::Error;
 use zotero_mcp::core::pdf::{
-    build_whole_document, extract_windowed, is_layout_faithful, DoclingEngine, PdfEngines,
-    PdfFormat, PdfTextSource, ServedFrom, DERIVATIVE_WINDOW_PAGES,
+    build_whole_document, extract_windowed, is_layout_faithful, DoclingEngine, ExtractPolicy,
+    PdfEngines, PdfFormat, PdfTextSource, ServedFrom, DERIVATIVE_WINDOW_PAGES,
 };
 
 /// Page count of `large.pdf`, mirrored from `gen_pdfs.py`. Above the default
@@ -68,7 +68,7 @@ async fn layout_engines() -> Option<PdfEngines> {
 async fn whole_document_tool_call_over_the_cap_is_still_refused() {
     // The store exists *because* this refusal is correct and must stay.
     let tmp = tempfile::tempdir().unwrap();
-    let err = extract_windowed(&fixture("large.pdf"), tmp.path(), &flat_engines(), false, None)
+    let err = extract_windowed(&fixture("large.pdf"), tmp.path(), &flat_engines(), ExtractPolicy::allowing_degraded(), None)
         .await
         .expect_err("a 60-page whole-document request must be refused");
     match err {
@@ -84,6 +84,7 @@ async fn window_walk_covers_every_page_of_a_document_over_the_cap() {
         &fixture("large.pdf"),
         tmp.path(),
         &flat_engines(),
+        ExtractPolicy::allowing_degraded(),
         DERIVATIVE_WINDOW_PAGES,
     )
     .await
@@ -110,17 +111,19 @@ async fn assembly_matches_the_windows_it_was_built_from() {
     let tmp = tempfile::tempdir().unwrap();
     let engines = flat_engines();
     let (assembled, windows) =
-        build_whole_document(&fixture("large.pdf"), tmp.path(), &engines, 20)
+        build_whole_document(
+            &fixture("large.pdf"),
+            tmp.path(),
+            &engines,
+            ExtractPolicy::allowing_degraded(),
+            20,
+        )
             .await
             .unwrap();
 
     let mut manual = String::new();
     for (from, to) in &windows {
-        let w = extract_windowed(
-            &fixture("large.pdf"),
-            tmp.path(),
-            &engines,
-            false,
+        let w = extract_windowed(&fixture("large.pdf"), tmp.path(), &engines, ExtractPolicy::allowing_degraded(),
             Some((*from, *to)),
         )
         .await
@@ -141,7 +144,13 @@ async fn assembly_matches_the_windows_it_was_built_from() {
 async fn a_small_document_builds_in_one_window() {
     let tmp = tempfile::tempdir().unwrap();
     let (result, windows) =
-        build_whole_document(&fixture("multipage.pdf"), tmp.path(), &flat_engines(), 20)
+        build_whole_document(
+            &fixture("multipage.pdf"),
+            tmp.path(),
+            &flat_engines(),
+            ExtractPolicy::allowing_degraded(),
+            20,
+        )
             .await
             .unwrap();
     assert_eq!(windows, vec![(1, 3)], "under the cap: no walk needed");
@@ -153,11 +162,7 @@ async fn a_small_document_builds_in_one_window() {
 #[tokio::test]
 async fn flat_text_output_is_never_layout_faithful() {
     let tmp = tempfile::tempdir().unwrap();
-    let r = extract_windowed(
-        &fixture("tables.pdf"),
-        tmp.path(),
-        &flat_engines(),
-        false,
+    let r = extract_windowed(&fixture("tables.pdf"), tmp.path(), &flat_engines(), ExtractPolicy::allowing_degraded(),
         None,
     )
     .await
@@ -180,16 +185,12 @@ async fn character_count_does_not_qualify_output_for_storage() {
         return;
     };
     let tmp = tempfile::tempdir().unwrap();
-    let flat = extract_windowed(
-        &fixture("tables.pdf"),
-        tmp.path(),
-        &flat_engines(),
-        false,
+    let flat = extract_windowed(&fixture("tables.pdf"), tmp.path(), &flat_engines(), ExtractPolicy::allowing_degraded(),
         None,
     )
     .await
     .unwrap();
-    let md = extract_windowed(&fixture("tables.pdf"), tmp.path(), &layout, false, None)
+    let md = extract_windowed(&fixture("tables.pdf"), tmp.path(), &layout, ExtractPolicy::allowing_degraded(), None)
         .await
         .unwrap();
 
@@ -221,7 +222,7 @@ async fn store_serves_the_second_read_without_re_extracting() {
         DerivativeStatus::Absent
     );
 
-    let (built, windows) = build_whole_document(&pdf, tmp.path(), &layout, 20)
+    let (built, windows) = build_whole_document(&pdf, tmp.path(), &layout, ExtractPolicy::default(), 20)
         .await
         .unwrap();
     assert!(is_layout_faithful(&built));
@@ -299,11 +300,7 @@ async fn store_root_is_outside_the_zotero_tree() {
 #[tokio::test]
 async fn served_from_defaults_to_fresh_on_a_real_extraction() {
     let tmp = tempfile::tempdir().unwrap();
-    let r = extract_windowed(
-        &fixture("hello.pdf"),
-        tmp.path(),
-        &flat_engines(),
-        false,
+    let r = extract_windowed(&fixture("hello.pdf"), tmp.path(), &flat_engines(), ExtractPolicy::allowing_degraded(),
         None,
     )
     .await
@@ -337,7 +334,7 @@ async fn second_read_is_served_from_the_store_without_re_extracting() {
     let store = DerivativeStore::new(tmp.path().join("derivatives"));
 
     let first = get_pdf_text_stored(
-        &pool, "AAAA0001", 1, &f.storage_dir(), &layout, &store, false, None, false,
+        &pool, "AAAA0001", 1, &f.storage_dir(), &layout, &store, ExtractPolicy::default(), None, false,
     )
     .await
     .unwrap();
@@ -347,7 +344,7 @@ async fn second_read_is_served_from_the_store_without_re_extracting() {
     // Break the layout route completely. A store hit must not need it.
     let dead = PdfEngines::build(&ZoteroConfig::default()).with_docling(None);
     let second = get_pdf_text_stored(
-        &pool, "AAAA0001", 1, &f.storage_dir(), &dead, &store, false, None, false,
+        &pool, "AAAA0001", 1, &f.storage_dir(), &dead, &store, ExtractPolicy::default(), None, false,
     )
     .await
     .unwrap();
@@ -372,7 +369,7 @@ async fn a_window_is_served_from_a_stored_whole_document() {
     let store = DerivativeStore::new(tmp.path().join("derivatives"));
 
     let whole = get_pdf_text_stored(
-        &pool, "AAAA0001", 1, &f.storage_dir(), &layout, &store, false, None, false,
+        &pool, "AAAA0001", 1, &f.storage_dir(), &layout, &store, ExtractPolicy::default(), None, false,
     )
     .await
     .unwrap();
@@ -386,7 +383,7 @@ async fn a_window_is_served_from_a_stored_whole_document() {
         &f.storage_dir(),
         &dead,
         &store,
-        false,
+        ExtractPolicy::default(),
         Some((2, 2)),
         false,
     )
@@ -416,13 +413,13 @@ async fn refresh_forces_a_fresh_extraction() {
 
     for _ in 0..2 {
         let _ = get_pdf_text_stored(
-            &pool, "AAAA0001", 1, &f.storage_dir(), &layout, &store, false, None, false,
+            &pool, "AAAA0001", 1, &f.storage_dir(), &layout, &store, ExtractPolicy::default(), None, false,
         )
         .await
         .unwrap();
     }
     let refreshed = get_pdf_text_stored(
-        &pool, "AAAA0001", 1, &f.storage_dir(), &layout, &store, false, None, true,
+        &pool, "AAAA0001", 1, &f.storage_dir(), &layout, &store, ExtractPolicy::default(), None, true,
     )
     .await
     .unwrap();
@@ -439,7 +436,7 @@ async fn a_flat_text_run_stores_nothing_and_keeps_re_extracting() {
     let flat = flat_engines();
 
     let first = get_pdf_text_stored(
-        &pool, "AAAA0001", 1, &f.storage_dir(), &flat, &store, false, None, false,
+        &pool, "AAAA0001", 1, &f.storage_dir(), &flat, &store, ExtractPolicy::default(), None, false,
     )
     .await
     .unwrap();
@@ -455,7 +452,7 @@ async fn a_flat_text_run_stores_nothing_and_keeps_re_extracting() {
     );
 
     let second = get_pdf_text_stored(
-        &pool, "AAAA0001", 1, &f.storage_dir(), &flat, &store, false, None, false,
+        &pool, "AAAA0001", 1, &f.storage_dir(), &flat, &store, ExtractPolicy::default(), None, false,
     )
     .await
     .unwrap();
@@ -474,7 +471,7 @@ async fn plain_bypasses_the_store_in_both_directions() {
     let engines = layout_engines().await.unwrap_or_else(flat_engines);
 
     let r = get_pdf_text_stored(
-        &pool, "AAAA0001", 1, &f.storage_dir(), &engines, &store, true, None, false,
+        &pool, "AAAA0001", 1, &f.storage_dir(), &engines, &store, ExtractPolicy::plain(), None, false,
     )
     .await
     .unwrap();

@@ -6,6 +6,43 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+> **0.5.0 candidate.** One breaking change (degraded extraction now errors) and
+> the durable derivative store. Not yet released or installed: the degradation
+> change is sequenced behind repointing `zref`'s arbiter (task 9.4 of
+> `scan-and-large-pdf-extraction`), which needs sign-off.
+
+### Changed — BREAKING
+
+- **A degraded extraction is no longer an ordinary success.** When the
+  layout-aware route is *configured but unavailable* (cold, down, or a failed
+  convert), `get_pdf_text` and `get_pdf_first_pages` now return
+  `LayoutRouteUnavailable` instead of quietly returning flat text. Previously
+  both outcomes were HTTP successes distinguished only by a metadata field: on
+  the case that prompted this, the same call minutes apart returned plain text
+  with no tables and then markdown with all of them, at *comparable character
+  counts* (3,496 vs 3,299 on page one), so no size check could catch it. A
+  caller reading only the text would use table-free output believing it
+  complete and report "not in the document" for content that is in the
+  document.
+
+  - `allow_degraded=true` (new, per call) accepts flat text rather than an
+    error; the result is still labelled and still `complete: false`.
+  - `plain=true` is **unchanged and never gated** — asking for flat output on
+    purpose is a different thing from tolerating a degraded substitute.
+  - **A host with no layout route configured is unaffected.** CI, and any
+    machine without `DOCLING_URL` / `docling_url`, keeps today's labelled
+    flat-text behaviour and needs no opt-in.
+  - The degradation marker stays **out of the extracted text**: it is carried
+    in the result envelope and the error. The text is what downstream
+    fact-checking treats as authoritative, and a banner inside it would insert
+    sentences that are not in the document.
+  - A stored derivative is served regardless — a cold service cannot make an
+    already-extracted document unreadable.
+  - CLI: `zotero-mcp pdf-text --allow-degraded`. Without it, a refusal exits
+    non-zero rather than emitting text that looks fine.
+
+  See `docs/MIGRATION_0.5.md`.
+
 ### Added
 
 - **Durable PDF text derivatives — extraction happens once per document, not

@@ -1,7 +1,7 @@
 use crate::core::derivatives::{DerivativeStatus, DerivativeStore};
 use crate::core::pdf::{
     attachment_key_for, get_pdf_first_pages_stored, get_pdf_text_stored, is_layout_faithful,
-    PdfTextResult,
+    ExtractPolicy, PdfTextResult,
 };
 use crate::core::reader::annotations::list_annotations;
 use crate::core::reader::attachments::{list_attachments, resolve_path};
@@ -78,6 +78,18 @@ pub struct PdfTextArgs {
     /// Last page to extract (1-indexed, inclusive). See `from_page`.
     #[serde(default)]
     pub to_page: Option<u32>,
+    /// Accept flat-text output instead of an error when the layout-aware
+    /// route is configured on this server but unavailable (cold or down).
+    /// Default false: a table-free substitute is refused rather than returned
+    /// as an ordinary success, because a flat engine drops tables while
+    /// returning a similar volume of prose, and a caller reading only the text
+    /// cannot tell. Set true when partial text now beats no text — the result
+    /// is still labelled and marked incomplete. Not the same as `plain`, which
+    /// asks for flat output on purpose and is never gated. On a host with no
+    /// layout route configured at all, this argument is irrelevant: flat
+    /// extraction succeeds as it always did.
+    #[serde(default)]
+    pub allow_degraded: bool,
     /// Re-extract even when a stored derivative is current, replacing it.
     /// Normally unnecessary: a changed PDF or a bumped extraction profile
     /// invalidates the stored copy automatically. Use when you suspect the
@@ -109,7 +121,10 @@ pub async fn get_pdf_text_t(s: &AppState, a: PdfTextArgs) -> Result<Json<PdfText
         &s.cfg.storage_dir(),
         &s.pdf_engines,
         &s.derivatives,
-        a.plain,
+        ExtractPolicy {
+            plain: a.plain,
+            allow_degraded: a.allow_degraded,
+        },
         page_window(a.from_page, a.to_page),
         a.refresh,
     )
@@ -325,7 +340,7 @@ pub async fn build_derivatives_t(
             &s.cfg.storage_dir(),
             &s.pdf_engines,
             &s.derivatives,
-            false,
+            ExtractPolicy::default(),
             None,
             a.refresh,
         )
@@ -374,6 +389,18 @@ pub struct FirstPagesArgs {
     /// anchors), skipping the layout-aware Docling route.
     #[serde(default)]
     pub plain: bool,
+    /// Accept flat-text output instead of an error when the layout-aware
+    /// route is configured on this server but unavailable (cold or down).
+    /// Default false: a table-free substitute is refused rather than returned
+    /// as an ordinary success, because a flat engine drops tables while
+    /// returning a similar volume of prose, and a caller reading only the text
+    /// cannot tell. Set true when partial text now beats no text — the result
+    /// is still labelled and marked incomplete. Not the same as `plain`, which
+    /// asks for flat output on purpose and is never gated. On a host with no
+    /// layout route configured at all, this argument is irrelevant: flat
+    /// extraction succeeds as it always did.
+    #[serde(default)]
+    pub allow_degraded: bool,
 }
 fn two() -> usize {
     2
@@ -391,7 +418,10 @@ pub async fn get_pdf_first_pages_t(
         a.n,
         &s.pdf_engines,
         &s.derivatives,
-        a.plain,
+        ExtractPolicy {
+            plain: a.plain,
+            allow_degraded: a.allow_degraded,
+        },
     )
     .await
     .map_err(map_err)?;

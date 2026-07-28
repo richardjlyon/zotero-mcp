@@ -122,7 +122,7 @@ pub async fn propose_metadata_update(
         // Docling route would return page-anchored markdown (whose
         // `--- p.1 ---`/`#`/`|` markers break the line-based title/author
         // signals) and pay a full-document remote conversion to do it.
-        true,
+        crate::core::pdf::ExtractPolicy::plain(),
     )
     .await
     {

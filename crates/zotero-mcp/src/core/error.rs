@@ -123,6 +123,18 @@ pub enum Error {
         threshold: u32,
     },
 
+    #[error(
+        "the layout-aware extraction route ({endpoint}) is configured but \
+         unavailable, so {path} could only be read by a flat-text engine. A \
+         flat engine cannot detect tables: it returns the prose and drops the \
+         numbers, at a similar character count, which is why this is an error \
+         rather than a quietly degraded success. Remedies: bring the layout \
+         service back up; or pass allow_degraded=true to accept table-free \
+         text for this call (it will be labelled incomplete); or pass \
+         plain=true if flat text is what you actually want."
+    )]
+    LayoutRouteUnavailable { path: String, endpoint: String },
+
     #[error("derivative store: {0}")]
     DerivativeStore(String),
 

@@ -9,7 +9,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 use zotero_mcp::core::config::ZoteroConfig;
-use zotero_mcp::core::pdf::{
+use zotero_mcp::core::pdf::{ExtractPolicy, 
     extract, extract_windowed, truncate_to_first_pages, Completeness, DoclingEngine, PdfEngines,
     PdfFormat, PdfTextSource,
 };
@@ -71,7 +71,7 @@ async fn ocr_prestep_recovers_scanned_pdf_live() {
     let engines = PdfEngines::build(&cfg);
     let storage_item_dir = tempfile::TempDir::new().unwrap();
 
-    let r = extract(&scanned, storage_item_dir.path(), &engines, false)
+    let r = extract(&scanned, storage_item_dir.path(), &engines, ExtractPolicy::allowing_degraded())
         .await
         .expect("live OCR + Docling extraction succeeded");
 
@@ -113,7 +113,7 @@ async fn plain_option_forces_flat_path_despite_live_docling() {
     let engines = PdfEngines::build(&ZoteroConfig::default());
     let storage_item_dir = tempfile::TempDir::new().unwrap();
 
-    let r = extract(&hello_pdf(), storage_item_dir.path(), &engines, true)
+    let r = extract(&hello_pdf(), storage_item_dir.path(), &engines, ExtractPolicy::plain())
         .await
         .expect("plain flat-path extraction succeeded");
 
@@ -201,11 +201,7 @@ async fn window_walk_covers_the_whole_document_with_a_stable_total() {
     let markers = ["albatross", "badger", "capybara"];
     for (i, marker) in markers.iter().enumerate() {
         let page = (i + 1) as u32;
-        let r = extract_windowed(
-            &doc,
-            storage_item_dir.path(),
-            &engines,
-            false,
+        let r = extract_windowed(&doc, storage_item_dir.path(), &engines, ExtractPolicy::allowing_degraded(),
             Some((page, page)),
         )
         .await
@@ -244,11 +240,7 @@ async fn windowed_docling_anchors_carry_true_page_numbers_live() {
         return;
     };
     let storage_item_dir = tempfile::TempDir::new().unwrap();
-    let r = extract_windowed(
-        &fixture("multipage.pdf"),
-        storage_item_dir.path(),
-        &engines,
-        false,
+    let r = extract_windowed(&fixture("multipage.pdf"), storage_item_dir.path(), &engines, ExtractPolicy::allowing_degraded(),
         Some((2, 3)),
     )
     .await
@@ -315,7 +307,7 @@ async fn tables_extract_as_markdown_tables_live() {
         &fixture("tables.pdf"),
         storage_item_dir.path(),
         &engines,
-        false,
+        ExtractPolicy::allowing_degraded(),
     )
     .await
     .expect("live Docling extraction of tables.pdf succeeded");
@@ -385,7 +377,7 @@ async fn equation_decodes_to_latex_live() {
         &fixture("equation.pdf"),
         storage_item_dir.path(),
         &engines,
-        false,
+        ExtractPolicy::allowing_degraded(),
     )
     .await
     .expect("live Docling extraction of equation.pdf succeeded");
@@ -435,7 +427,7 @@ async fn two_column_reading_order_live() {
         &fixture("twocolumn.pdf"),
         storage_item_dir.path(),
         &engines,
-        false,
+        ExtractPolicy::allowing_degraded(),
     )
     .await
     .expect("live Docling extraction of twocolumn.pdf succeeded");
@@ -473,7 +465,7 @@ async fn multipage_assembles_anchors_and_truncates_on_page_boundaries_live() {
         &fixture("multipage.pdf"),
         storage_item_dir.path(),
         &engines,
-        false,
+        ExtractPolicy::allowing_degraded(),
     )
     .await
     .expect("live Docling extraction of multipage.pdf succeeded");
@@ -549,7 +541,7 @@ async fn enrichment_unavailable_live_declares_undecoded_formula() {
         &fixture("equation.pdf"),
         storage_item_dir.path(),
         &engines,
-        false,
+        ExtractPolicy::allowing_degraded(),
     )
     .await
     .expect("live Docling extraction of equation.pdf succeeded");
@@ -610,7 +602,7 @@ async fn image_only_pdf_with_docling_unreachable_never_returns_empty_success() {
         PdfEngines::build(&ZoteroConfig::default()).with_docling(Some(std::sync::Arc::new(dead)));
     let storage_item_dir = tempfile::TempDir::new().unwrap();
 
-    match extract(&scanned, storage_item_dir.path(), &engines, false).await {
+    match extract(&scanned, storage_item_dir.path(), &engines, ExtractPolicy::allowing_degraded()).await {
         Ok(r) => {
             let non_ws = r.text.chars().filter(|c| !c.is_whitespace()).count();
             assert!(
@@ -660,7 +652,7 @@ async fn plain_true_never_runs_ocr_rescue_on_scan() {
         PdfEngines::build(&ZoteroConfig::default()).with_docling(Some(std::sync::Arc::new(dead)));
     let storage_item_dir = tempfile::TempDir::new().unwrap();
 
-    match extract(&scanned, storage_item_dir.path(), &engines, true).await {
+    match extract(&scanned, storage_item_dir.path(), &engines, ExtractPolicy::plain()).await {
         Ok(r) => assert_ne!(
             r.source,
             PdfTextSource::OcrThenDocling,
@@ -692,7 +684,7 @@ async fn dead_docling_url_falls_back_flat_and_reports_incomplete() {
         &fixture("hello.pdf"),
         storage_item_dir.path(),
         &engines,
-        false,
+        ExtractPolicy::allowing_degraded(),
     )
     .await
     .expect("flat-text fallback extraction succeeded");

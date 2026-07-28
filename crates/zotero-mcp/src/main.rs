@@ -47,6 +47,12 @@ enum Command {
         /// Force the flat-text path (no Docling, no OCR, no page anchors).
         #[arg(long)]
         plain: bool,
+        /// Accept flat-text output rather than failing when the layout route
+        /// is configured but unavailable. Off by default: a fact-check arbiter
+        /// reading table-free text as though it were the document is worse
+        /// than a loud failure it can retry.
+        #[arg(long)]
+        allow_degraded: bool,
         /// Page-window size used when auto-walking a large document.
         #[arg(long, default_value_t = 25)]
         window_size: u32,
@@ -65,8 +71,9 @@ async fn main() -> anyhow::Result<()> {
             from,
             to,
             plain,
+            allow_degraded,
             window_size,
-        }) => run_pdf_text(item_key, from, to, plain, window_size).await,
+        }) => run_pdf_text(item_key, from, to, plain, allow_degraded, window_size).await,
         None => run_server().await,
     }
 }
@@ -80,10 +87,11 @@ async fn run_pdf_text(
     from: Option<u32>,
     to: Option<u32>,
     plain: bool,
+    allow_degraded: bool,
     window_size: u32,
 ) -> anyhow::Result<()> {
     use std::io::Write;
-    use zcore::pdf::{get_pdf_text_stored, ServedFrom};
+    use zcore::pdf::{get_pdf_text_stored, ExtractPolicy, ServedFrom};
 
     let cfg = zcore::Config::load().unwrap_or_default();
     // Logging goes to the log dir (never stdout), so stdout stays pure text.
@@ -124,7 +132,10 @@ async fn run_pdf_text(
         &storage,
         &state.pdf_engines,
         &state.derivatives,
-        plain,
+        ExtractPolicy {
+            plain,
+            allow_degraded,
+        },
         window,
         false,
     )
